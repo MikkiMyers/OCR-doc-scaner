@@ -7,158 +7,224 @@ export interface InvoiceParseResult {
   lineItems: LineItem[];
 }
 
-/* ---------------- utils ---------------- */
-const normalizeNumber = (s: string): number | undefined => {
-  const cleaned = (s || '')
-    .replace(/[^\d.,-]/g, '')
-    .replace(/,/g, '');
-  const n = parseFloat(cleaned);
-  return isNaN(n) ? undefined : n;
+/* --------------------- helpers --------------------- */
+const trim = (s: string) => (s || '').replace(/[ \t]+/g, ' ').trim();
+const toThousands = (n: number | undefined): string | undefined =>
+  typeof n === 'number' && isFinite(n)
+    ? n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : undefined;
+
+const cleanText = (t: string) =>
+  trim(
+    (t || '')
+      .normalize('NFC')
+      .replace(/\u00A0/g, ' ')
+      .replace(/[|[\]]/g, '') // ตัดตัวอักษรเกะกะ เช่น | ]
+  );
+
+/** "23 75" -> "23.75", "2375" -> "23.75" */
+const normalizeQty = (raw: string) => {
+  let s = String(raw).replace(/[^\d\s.,-]/g, '').replace(/,/g, '');
+  s = s.replace(/\b(\d+)\s+(\d{2})\b/g, '$1.$2');
+  if (/^\d{3,}$/.test(s) && !/\./.test(s)) s = s.slice(0, -2) + '.' + s.slice(-2);
+  return s;
 };
 
-const moneyField = (raw?: string | null): SMoneyField | undefined => {
+const parseMoneyToken = (raw: string): number | undefined => {
   if (!raw) return undefined;
-  const value = normalizeNumber(raw);
-  return { raw, value, text: value !== undefined ? value.toFixed(2) : raw };
+  let s = String(raw).replace(/[^\d\s.,]/g, '');
+  s = s.replace(/\b(\d+)\s+(\d{2})\b/g, '$1.$2'); // "40 00" -> "40.00"
+  s = s.replace(/,/g, '');
+  if (/\d\.\d{1,}/.test(s)) {
+    const n = parseFloat(s); return isFinite(n) ? n : undefined;
+  }
+  if (/^\d{3,}$/.test(s)) {
+    const n = parseFloat(`${s.slice(0, -2)}.${s.slice(-2)}`);
+    return isFinite(n) ? n : undefined;
+  }
+  if (/^\d+$/.test(s)) {
+    const n = parseFloat(s); return isFinite(n) ? n : undefined;
+  }
+  return undefined;
 };
 
-const percentFrom = (raw?: string | null): number | undefined => {
+const moneyField = (raw?: string): SMoneyField | undefined => {
   if (!raw) return undefined;
-  const m = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*%/);
-  return m ? parseFloat(m[1]) : undefined;
+  const v = parseMoneyToken(raw);
+  return { raw: String(raw), value: v, text: toThousands(v) };
 };
 
-/* ------------- core helpers ------------- */
-function extractItemsSegment(clean: string): string | undefined {
-  // หา header ของตาราง (รูปแบบพบบ่อย)
-  const header =
-    clean.match(/DESCRIPTION\s+UNIT\s+PRICE\s+QTY\s+TOTAL/i) ||
-    clean.match(/DESCRIPTION\s+QTY\s+UNIT\s+PRICE\s+TOTAL/i) ||
-    clean.match(/DESCRIPTION\s+PRICE\s+QTY\s+TOTAL/i) ||
-    clean.match(/DESCRIPTION\s+QTY\s+TOTAL/i) || 
-    clean.match(/DESCRIPTION\s+UNIT\s+PRICE\s+QUANTITY\s+TOTAL/i);
+/* ------------------ line items (token stream) ------------------ */
+const sliceItemsRegion = (clean: string): string | undefined => {
+  // ยอมให้อยู่บรรทัดเดียวกันได้
+  const headerRe = /\b(QUANTITY|QTY)\b\s+DESCRIPTION\s+\b(UNIT\s+PRICE|PRICE)\b\s+\b(COST|AMOUNT)\b/i;
+  const h = headerRe.exec(clean);
+  if (!h || h.index == null) return undefined;
 
-  if (!header || header.index === undefined) return undefined;
+  const afterHeaderIdx = h.index + h[0].length;
 
-  const startIdx = header.index + header[0].length;
-  const tailSlice = clean.slice(startIdx);
+  // ตัดท้ายที่ SUBTOTAL หรือ TOTAL (แบบ word boundary กันชน Subtotal)
+  const tail = clean.slice(afterHeaderIdx);
+  const endMatch = /(\bSUBTOTAL\b|\bTOTAL\s+DUE\b|\bTOTAL\b)/i.exec(tail);
+  const endIdx = endMatch?.index != null ? afterHeaderIdx + endMatch.index! : clean.length;
 
-  // ตัดถึง SUBTOTAL หรือ TOTAL (word boundary กันชน SUBTOTAL)
-  const tailMatch = tailSlice.match(/\bSUBTOTAL\b|(?:^|\b)TOTAL\b/i);
-  const endIdx = tailMatch && tailMatch.index !== undefined
-    ? startIdx + tailMatch.index
-    : clean.length;
+  const seg = clean.slice(afterHeaderIdx, endIdx);
+  return seg.trim() || undefined;
+};
 
-  const seg = clean.slice(startIdx, endIdx).replace(/\s+/g, ' ').trim();
-  return seg || undefined;
-}
+const isWord = (t: string) => /[A-Za-z]/.test(t);
+const isNum = (t: string) => /^\$?[\d.,]+$/.test(t);
 
-function parseItemsFromSegment(seg: string): LineItem[] {
+// รวมโทเคนเงินกรณีแตกเป็น "40 00"
+const readMoney = (tokens: string[], i: number) => {
+  const cur = tokens[i] || '';
+  const nxt = tokens[i + 1] || '';
+
+  // case มีจุดอยู่แล้ว / มี comma
+  if (/\d[\d,]*\.\d{1,2}/.test(cur) || /^\$?\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(cur)) {
+    const v = parseMoneyToken(cur);
+    if (v != null) return { raw: cur, value: v, next: i + 1 };
+  }
+
+  // case "40 00"
+  if (/^\d+$/.test(cur) && /^\d{2}$/.test(nxt)) {
+    const raw = `${cur} ${nxt}`;
+    const v = parseMoneyToken(raw);
+    if (v != null) return { raw, value: v, next: i + 2 };
+  }
+
+  // case "100000" (-> 1000.00)
+  if (/^\d{3,}$/.test(cur)) {
+    const v = parseMoneyToken(cur);
+    if (v != null) return { raw: cur, value: v, next: i + 1 };
+  }
+
+  return null;
+};
+
+const readQty = (tokens: string[], i: number) => {
+  const cur = tokens[i] || '';
+  const nxt = tokens[i + 1] || '';
+  if (/^\d+$/.test(cur) && /^\d{2}$/.test(nxt)) {
+    return { raw: `${cur} ${nxt}`, text: normalizeQty(`${cur} ${nxt}`), next: i + 2 };
+  }
+  if (/^\d{1,4}([.,]\d{1,2})?$/.test(cur) || /^\d{3,}$/.test(cur)) {
+    return { raw: cur, text: normalizeQty(cur), next: i + 1 };
+  }
+  return null;
+};
+
+const parseLineItems = (seg: string): LineItem[] => {
+  const tokens = seg.replace(/\n+/g, ' ').split(/\s+/).filter(Boolean);
   const items: LineItem[] = [];
+  let i = 0;
 
-  // โครง: <desc> <unitPrice> <qty> <amount>
-  // ตัวอย่าง: "Brand consultation 100 1 $100"
-  // ใช้ lookahead ให้หยุดก่อนคำขึ้นต้นตัวอักษรถัดไป หรือจบสตริง
-  const re =
-    /([A-Za-z][A-Za-z0-9\s\-\/&.,]+?)\s+(\$?\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+\$?(\d+(?:\.\d+)?)(?=\s+[A-Za-z]|$)/g;
+  while (i < tokens.length) {
+    // อ่าน qty
+    const q = readQty(tokens, i);
+    if (!q) { i++; continue; }
+    let j = q.next;
 
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(seg)) !== null) {
-    items.push({
-      description: m[1].trim(),
-      unitPrice: m[2],
-      qty: m[3],
-      amount: m[4],
-    });
-  }
-  return items;
-}
+    // เดินเก็บคำอธิบายจนพบเงินก้อนแรก
+    let firstMoneyIdx = -1;
+    for (let k = j; k < Math.min(tokens.length, j + 20); k++) {
+      const m = readMoney(tokens, k);
+      if (m) { firstMoneyIdx = k; break; }
+    }
+    if (firstMoneyIdx === -1) { i = j; continue; }
 
-/* ------------- main parser ------------- */
-export function parseInvoice(text: string): InvoiceParseResult {
-  const fields: SmartFields = { docType: 'invoice' };
-  const lineItems: LineItem[] = [];
+    // เงินก้อนที่สอง (amount)
+    const m1 = readMoney(tokens, firstMoneyIdx)!;
+    const m2 = readMoney(tokens, m1.next || firstMoneyIdx + 1);
+    if (!m2) { i = m1.next; continue; }
 
-  const clean = (text || '').replace(/\r/g, '').trim();
+    const desc = trim(tokens.slice(j, firstMoneyIdx).join(' '));
+    if (!desc || !isWord(desc)) { i = m2.next; continue; }
 
-  /* doc no (เอาเฉพาะจาก INVOICE NO:) */
-  const docNoMatch = clean.match(/INVOICE\s*NO[:\s]*([A-Za-z0-9\-]+)/i);
-  if (docNoMatch) fields.docNo = docNoMatch[1].trim();
+    const unit = m1.value;
+    const amt = m2.value;
 
-  /* dates */
-  const dateMatch = clean.match(/(?:^|\s)DATE[:\s]*([0-9./-]+)/i);
-  if (dateMatch) fields.date = dateMatch[1].trim();
+    // sanity check: unit * qty ~ amount (ยอมเพี้ยนเล็กน้อย)
+    const qn = parseFloat(q.text);
+    const expect = isFinite(qn) && unit != null ? +(qn * unit).toFixed(2) : undefined;
+    const ok = expect == null || amt == null ? true : Math.abs(amt - expect) <= Math.max(0.05, expect * 0.02);
 
-  const dueMatch = clean.match(/DUE\s*DATE[:\s]*([0-9./-]+)/i);
-  if (dueMatch) fields.dueDate = dueMatch[1].trim();
-
-  /* parties */
-  // ISSUED TO: ... (จนกว่าจะถึง PAY TO: หรือ INVOICE)
-  const issuedToBlock = clean.match(/ISSUED TO:?\s*([\s\S]*?)(?=\n\s*(PAY TO:|INVOICE\b))/i);
-  if (issuedToBlock) {
-    fields.buyer = issuedToBlock[1].replace(/\s+/g, ' ').trim();
-  } else {
-    const issuedSimple = clean.match(/ISSUED TO:?\s*([\s\S]*?)\n\n/i);
-    if (issuedSimple) fields.buyer = issuedSimple[1].replace(/\s+/g, ' ').trim();
-  }
-
-  const payToBlock = clean.match(/PAY TO:?\s*([\s\S]*?)(?=\n\s*INVOICE\b)/i);
-  if (payToBlock) {
-    fields.seller = payToBlock[1].replace(/\s+/g, ' ').trim();
-  } else {
-    const payToSimple = clean.match(/PAY TO:?\s*([\s\S]*?)\n\n/i);
-    if (payToSimple) fields.seller = payToSimple[1].replace(/\s+/g, ' ').trim();
-  }
-
-  /* amounts */
-  const subtotalMatch = clean.match(/(?:^|\b)SUBTOTAL\b[:\s]*\$?([\d,]+(?:\.\d+)?)/i);
-  if (subtotalMatch) fields.subtotal = moneyField(subtotalMatch[1]);
-
-  // รองรับ "VAT: 40" หรือ "Tax 10%"
-  const vatMatch = clean.match(/(?:VAT|Tax)\b[:\s]*([0-9.,]+%?)/i);
-  if (vatMatch) {
-    const raw = vatMatch[1];
-    if (/%/.test(raw)) {
-      fields.vat = { raw, value: undefined, text: raw };
+    if (ok) {
+      items.push({
+        description: desc,
+        unitPrice: unit != null ? toThousands(unit) ?? String(unit) : undefined as any,
+        qty: q.text,
+        amount: amt != null ? toThousands(amt) ?? String(amt) : undefined as any,
+      } as LineItem);
+      i = m2.next;
     } else {
-      fields.vat = moneyField(raw);
+      // ถ้าไม่แมตช์ ให้ขยับทีละหนึ่งกันติดลูป
+      i = j;
     }
   }
 
-  // TOTAL ต้องเป็น word boundary ไม่ชน SUBTOTAL
-  const totalMatch = clean.match(/(?:^|\b)TOTAL\b[:\s]*\$?([\d,]+(?:\.\d+)?)/i);
-  if (totalMatch) fields.total = moneyField(totalMatch[1]);
+  return items;
+};
 
-  // ถ้าไม่เจอ TOTAL แต่มี subtotal + VAT%
-  if (!fields.total?.value && fields.subtotal?.value !== undefined) {
-    const p = percentFrom(fields.vat?.raw || fields.vat?.text);
-    if (p !== undefined) {
-      const est = +(fields.subtotal.value * (1 + p / 100)).toFixed(2);
-      fields.total = { raw: est.toString(), value: est, text: est.toFixed(2) };
-    }
+/* --------------------- main parser --------------------- */
+export function parseInvoice(text: string): InvoiceParseResult {
+  const clean = cleanText(text);
+  const fields: SmartFields = { docType: 'invoice' } as any;
+
+  // doc no
+  const docNo = clean.match(/(?:INVOICE\s*NO|INVOICE\s*#|เลขที่ใบแจ้งหนี้)\s*[:#-]?\s*([A-Za-z0-9\-\/]+)/i);
+  if (docNo) fields.docNo = docNo[1].trim();
+
+  // date
+  const date = clean.match(/(?:DATE|วันที่)\s*[:\-]?\s*([0-9]{1,2}[\/\-.][0-9]{1,2}[\/\-.][0-9]{2,4})/i);
+  if (date) fields.date = date[1];
+
+  // totals
+  const subtotalRaw = clean.match(/\bSUBTOTAL\b\s*[:\-]?\s*\$?([\d\s,.-]+)/i)?.[1];
+
+  // หา VAT/TAX เฉพาะโซนหลัง SUBTOTAL เพื่อหลบ "Tax Registered No"
+  let vatRaw: string | undefined;
+  const afterSub = clean.split(/\bSUBTOTAL\b/i)[1];
+  if (afterSub) {
+    vatRaw = afterSub.match(/\b(?:TAX|VAT)\b\s*[:\-]?\s*\$?([\d\s,.-]+%?)/i)?.[1];
   }
 
-  /* line items (จาก segment ระหว่างหัวตาราง → SUBTOTAL/TOTAL) */
-  const seg = extractItemsSegment(clean);
-  if (seg) {
-    const items = parseItemsFromSegment(seg);
-    lineItems.push(...items);
-  } else {
-    // fallback แบบบรรทัดต่อบรรทัด (กรณีเอกสารบางแบบ)
-    const lines = clean.split(/\n+/);
-    const re = /^(.+?)\s+(\$?\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+\$?(\d+(?:\.\d+)?)(?!\S)/;
-    for (const line of lines) {
-      const m = line.match(re);
-      if (m) {
-        lineItems.push({
-          description: m[1].trim(),
-          unitPrice: m[2],
-          qty: m[3],
-          amount: m[4],
-        });
+  const totalRaw =
+    clean.match(/\bTOTAL\s+DUE\b\s*[:\-]?\s*\$?([\d\s,.-]+)/i)?.[1] ||
+    clean.match(/\bTOTAL\b\s*[:\-]?\s*\$?([\d\s,.-]+)/i)?.[1];
+
+  const subtotal = moneyField(subtotalRaw);
+  const total = moneyField(totalRaw);
+
+  // VAT/TAX
+  let vat: SMoneyField | undefined;
+  if (vatRaw) {
+    if (/%/.test(vatRaw)) {
+      vat = { raw: vatRaw, text: vatRaw };
+    } else {
+      let v = parseMoneyToken(vatRaw);
+      if (v != null) {
+        const ref = subtotal?.value ?? total?.value;
+        if (ref && v > ref * 0.8) v = v / 100; // OCR ยุบจุด
       }
+      vat = { raw: vatRaw, value: v, text: toThousands(v) };
     }
   }
+  // fallback: คำนวณจาก total - subtotal
+  if (!vat && subtotal?.value != null && total?.value != null) {
+    const v = +(total.value - subtotal.value).toFixed(2);
+    if (v >= 0 && v <= subtotal.value * 0.3) {
+      vat = { raw: String(v), value: v, text: toThousands(v) };
+    }
+  }
+
+  if (subtotal) (fields as any).subtotal = subtotal;
+  if (vat) (fields as any).vat = vat;
+  if (total) (fields as any).total = total;
+
+  // line items
+  const seg = sliceItemsRegion(clean);
+  const lineItems = seg ? parseLineItems(seg) : [];
 
   return { text: clean, fields, lineItems };
 }
