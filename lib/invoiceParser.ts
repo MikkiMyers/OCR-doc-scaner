@@ -26,13 +26,46 @@ const normalizeQty=(raw:string)=>{
   return s;
 };
 
-const parseMoneyToken=(raw:string):number|undefined=>{
-  if(!raw) return undefined;
-  let s=String(raw).replace(/[^\d\s.,-]/g,'').replace(/,/g,'').trim();
-  s=s.replace(/\b(\d+)\s+(\d{2})\b/g,'$1.$2'); // "40 00"→"40.00"
-  if(/\d\.\d{1,}/.test(s)) { const n=parseFloat(s); return isFinite(n)?n:undefined; }
-  if(/^\d{3,}$/.test(s))  { const n=parseFloat(`${s.slice(0,-2)}.${s.slice(-2)}`); return isFinite(n)?n:undefined; }
-  if(/^\d+$/.test(s))     { const n=parseFloat(s); return isFinite(n)?n:undefined; }
+const parseMoneyToken = (raw: string): number | undefined => {
+  if (!raw) return undefined;
+
+  const orig = String(raw);
+  // เก็บตัวเลข/ช่องว่าง/จุด/คอมมาไว้
+  let s = orig.replace(/[^0-9\s.,]/g, '').replace(/,/g, '').trim();
+
+  // เคส "40 00" -> "40.00"
+  s = s.replace(/\b(\d+)\s+(\d{2})\b/g, '$1.$2');
+
+  // ถ้ามีจุดทศนิยมอยู่แล้ว ก็แปลงตรง ๆ
+  if (/\d\.\d{1,}/.test(s)) {
+    const n = parseFloat(s);
+    return isFinite(n) ? n : undefined;
+  }
+
+  // --- กฎใหม่สำคัญ ---
+  // 1) เลข 1–3 หลัก: ให้ตีความเป็น "จำนวนเต็ม" (เช่น 100 -> 100.00)
+  //    ยกเว้นกรณีขึ้นต้นด้วยศูนย์และยาว 3 ตัว เช่น "080" -> 0.80
+  if (/^\d{1,3}$/.test(s)) {
+    if (s.length === 3 && s.startsWith('0')) {
+      const n = parseFloat(`${s.slice(0, -2) || '0'}.${s.slice(-2)}`); // 080 -> 0.80
+      return isFinite(n) ? n : undefined;
+    }
+    const n = parseFloat(s); // 100 -> 100.00, 400 -> 400.00
+    return isFinite(n) ? n : undefined;
+  }
+
+  // 2) เลขตั้งแต่ 4 หลักขึ้นไป: ถือว่าเป็นทศนิยมที่ถูกยุบจุด (43920 -> 439.20)
+  if (/^\d{4,}$/.test(s)) {
+    const n = parseFloat(`${s.slice(0, -2)}.${s.slice(-2)}`);
+    return isFinite(n) ? n : undefined;
+  }
+
+  // สำรอง: เลขล้วน
+  if (/^\d+$/.test(s)) {
+    const n = parseFloat(s);
+    return isFinite(n) ? n : undefined;
+  }
+
   return undefined;
 };
 const moneyField=(raw?:string):SMoneyField|undefined=> raw?{raw:String(raw),value:parseMoneyToken(raw),text:toThousands(parseMoneyToken(raw))}:undefined;
