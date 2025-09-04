@@ -1,0 +1,374 @@
+/*
+  Minimal Professional UI Kit (CSS only) — v2
+  - เพิ่ม status pill + inline progress, toast
+  - ปรับ skeleton ให้เป็น static (ไม่มีแสงวูบ)
+*/
+
+*{box-sizing:border-box}
+html,body{height:100%}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0}
+img,svg,video,canvas{max-width:100%;display:block}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus{outline:none}
+
+/* -------- Theme tokens -------- */
+:root{
+  --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Thai","Noto Sans","Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";
+
+  --bg:#f8fafc; --panel:#fff; --text:#0f172a; --muted:#475569; --border:#e5e7eb;
+  --primary:#2563eb; --primary-ink:#fff; --accent:#059669; --warning:#f59e0b; --danger:#ef4444;
+
+  --radius:12px; --radius-sm:10px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.06);
+  --shadow-md:0 6px 18px rgba(15,23,42,.08);
+  --shadow-lg:0 12px 28px rgba(15,23,42,.12);
+  --focus:0 0 0 3px rgba(37,99,235,.25);
+
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-5:20px; --space-6:24px; --space-8:32px; --space-10:40px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0b1220; --panel:#0f172a; --text:#e5e7eb; --muted:#94a3b8; --border:#1f2937;
+    --primary:#3b82f6; --primary-ink:#0b1220;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+    --shadow-md:0 6px 18px rgba(0,0,0,.45);
+    --shadow-lg:0 12px 28px rgba(0,0,0,.55);
+    --focus:0 0 0 3px rgba(59,130,246,.35);
+  }
+}
+
+/* -------- Base -------- */
+body{
+  font-family:var(--font-sans);
+  color:var(--text);
+  background:linear-gradient(180deg,var(--bg) 0%,color-mix(in lab,var(--bg),#000 2%) 100%);
+  line-height:1.6;
+}
+.container{max-width:1200px;margin:0 auto;padding:var(--space-6)}
+.small{font-size:.875rem;color:var(--muted)}
+.muted{color:var(--muted)}
+h1,h2,h3{margin:0 0 var(--space-4);line-height:1.25}
+h1{font-size:clamp(24px,3.5vw,34px);letter-spacing:-.02em}
+h2{font-size:clamp(20px,2.5vw,26px)}
+h3{font-size:clamp(18px,2vw,22px)}
+
+/* -------- Header / layout -------- */
+.app-header{position:sticky;top:0;z-index:50;background:color-mix(in lab,var(--panel),transparent 0%);backdrop-filter:saturate(180%) blur(8px);border-bottom:1px solid var(--border);box-shadow:var(--shadow-sm)}
+.app-header .inner{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-3) var(--space-6)}
+.logo{font-weight:700;letter-spacing:.02em}
+.grow{flex:1}
+.layout{display:grid;grid-template-columns:280px 1fr;gap:var(--space-6)}
+@media (max-width:980px){.layout{grid-template-columns:1fr}}
+.sidebar{position:sticky;top:calc(56px + var(--space-6));height:fit-content;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-sm)}
+.sidebar .section{padding:var(--space-5);border-bottom:1px dashed var(--border)}
+.sidebar .section:last-child{border-bottom:0}
+
+/* -------- Cards -------- */
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-md);overflow:hidden}
+.card-header{padding:var(--space-5);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:var(--space-4)}
+.card-title{font-weight:600;letter-spacing:.01em}
+.card-body{padding:var(--space-5)}
+.card-footer{padding:var(--space-4) var(--space-5);border-top:1px solid var(--border);background:color-mix(in lab,var(--panel),#000 2%)}
+
+/* -------- Buttons -------- */
+.btn{--bg-btn:var(--panel);--fg-btn:var(--text);display:inline-flex;align-items:center;justify-content:center;gap:.5rem;padding:10px 14px;border-radius:calc(var(--radius) - 4px);border:1px solid var(--border);background:var(--bg-btn);color:var(--fg-btn);box-shadow:var(--shadow-sm);cursor:pointer;user-select:none;text-decoration:none;transition:transform .06s ease,background-color .2s ease,border-color .2s ease,box-shadow .2s ease}
+.btn:hover{transform:translateY(-1px);box-shadow:var(--shadow-md)}
+.btn:active{transform:translateY(0);box-shadow:var(--shadow-sm)}
+.btn:focus-visible{box-shadow:var(--shadow-md),var(--focus)}
+.btn[disabled]{opacity:.55;pointer-events:none}
+.btn-primary{--bg-btn:var(--primary);--fg-btn:var(--primary-ink);border-color:color-mix(in lab,var(--primary),#000 16%)}
+.btn-outline{background:transparent}
+.btn-ghost{border-color:transparent;background:transparent;box-shadow:none}
+.btn-success{--bg-btn:var(--accent);--fg-btn:#fff;border-color:color-mix(in lab,var(--accent),#000 16%)}
+.btn-danger{--bg-btn:var(--danger);--fg-btn:#fff;border-color:color-mix(in lab,var(--danger),#000 12%)}
+.btn-sm{padding:6px 10px;font-size:.875rem}
+.btn-lg{padding:14px 18px;font-weight:600}
+
+/* -------- Form controls -------- */
+.label{display:block;font-weight:600;margin-bottom:6px}
+.input,.select,.textarea{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:calc(var(--radius) - 6px);background:color-mix(in lab,var(--panel),transparent 0%);color:var(--text);transition:border-color .2s ease,box-shadow .2s ease,background-color .2s ease}
+.input::placeholder,.textarea::placeholder{color:color-mix(in lab,var(--muted),transparent 20%)}
+.input:focus,.select:focus,.textarea:focus{border-color:color-mix(in lab,var(--primary),#000 10%);box-shadow:var(--focus)}
+.textarea{min-height:120px;resize:vertical}
+.input-group{display:grid;grid-template-columns:180px 1fr;gap:var(--space-4);align-items:center}
+@media (max-width:720px){.input-group{grid-template-columns:1fr}}
+.switch{position:relative;width:46px;height:26px;border-radius:999px;background:color-mix(in lab,var(--muted),#fff 70%);transition:background .2s ease}
+.switch input{position:absolute;inset:0;opacity:0}
+.switch .dot{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:var(--shadow-sm);transition:transform .2s ease}
+.switch input:checked + .dot{transform:translateX(20px)}
+.switch input:checked ~ .track{background:var(--primary)}
+
+/* -------- Table -------- */
+.table{width:100%;border-collapse:separate;border-spacing:0}
+.table thead th{text-align:left;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:12px 14px;border-bottom:1px solid var(--border)}
+.table tbody td{padding:12px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+.table tbody tr:hover{background:color-mix(in lab,var(--panel),#000 3%)}
+.table tfoot td{padding:12px 14px;font-weight:600}
+.table .num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .55rem;border-radius:999px;background:color-mix(in lab,var(--primary),#fff 85%);color:color-mix(in lab,var(--primary),#000 25%);border:1px solid color-mix(in lab,var(--primary),#000 10%);font-size:.75rem}
+.row-total{font-size:1.05rem;font-weight:700}
+.row-subtle{color:var(--muted)}
+
+/* -------- Dropzone -------- */
+.dropzone{border:2px dashed color-mix(in lab,var(--muted),var(--border) 60%);background:color-mix(in lab,var(--panel),#000 3%);padding:var(--space-8);text-align:center;border-radius:var(--radius);transition:border-color .2s ease,background-color .2s ease,box-shadow .2s ease}
+.dropzone:hover{border-color:var(--primary);box-shadow:var(--shadow-md)}
+.dropzone.is-dragover{border-color:var(--primary);background:color-mix(in lab,var(--panel),var(--primary) 6%)}
+.dropzone .hint{color:var(--muted);font-size:.95rem}
+
+/* -------- Alerts -------- */
+.alert{display:flex;gap:var(--space-4);align-items:flex-start;padding:var(--space-4);border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--panel);box-shadow:var(--shadow-sm)}
+.alert .title{font-weight:600}
+.alert.success{border-color:color-mix(in lab,var(--accent),#000 16%);background:color-mix(in lab,var(--accent),#fff 90%)}
+.alert.warn{border-color:color-mix(in lab,var(--warning),#000 16%);background:color-mix(in lab,var(--warning),#fff 92%)}
+.alert.error{border-color:color-mix(in lab,var(--danger),#000 16%);background:color-mix(in lab,var(--danger),#fff 92%)}
+
+/* -------- Progress & Status (ใหม่) -------- */
+.progress{height:10px;width:100%;background:color-mix(in lab,var(--panel),#000 6%);border-radius:999px;overflow:hidden;border:1px solid var(--border)}
+.progress>.bar{height:100%;width:0%;background:var(--primary);transition:width .3s ease}
+
+.status{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--panel);box-shadow:var(--shadow-sm)}
+.status .dot{width:10px;height:10px;border-radius:999px;background:var(--muted);box-shadow:inset 0 0 0 1px color-mix(in lab,var(--muted),#000 20%)}
+.status--preprocess .dot{background:var(--warning)}
+.status--ocr .dot{background:var(--primary)}
+.status--done .dot{background:var(--accent)}
+.status--error .dot{background:var(--danger)}
+.status .label{font-weight:600;font-size:.9rem;color:var(--text)}
+.status .progress-inline{flex:1;min-width:160px;height:8px;border-radius:999px;background:color-mix(in lab,var(--panel),#000 8%);border:1px solid var(--border);overflow:hidden}
+.status .progress-inline span{display:block;height:100%;width:0%;background:var(--primary);transition:width .25s ease}
+.status .pct{font-variant-numeric:tabular-nums;font-size:.875rem;color:var(--muted);min-width:42px;text-align:right}
+
+/* -------- Skeleton (ไม่มีแสงวูบ) + Media box -------- */
+.skeleton{background:color-mix(in lab,var(--panel),#000 4%);border:1px solid var(--border);border-radius:8px}
+.skeleton--shimmer::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,color-mix(in lab,var(--panel),#fff 12%),transparent);transform:translateX(-100%);animation:ske 1.4s infinite}
+@keyframes ske{100%{transform:translateX(100%)}}
+.media-box{border:1px solid var(--border);background:color-mix(in lab,var(--panel),#000 2%);border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;min-height:240px}
+.media-box img,.media-box canvas{max-height:360px;width:auto}
+
+/* -------- Modal -------- */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:100}
+.modal{width:min(680px,92vw);background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);transform:translateY(10px);opacity:0;transition:.2s ease}
+.modal-header,.modal-footer{padding:var(--space-5);border-bottom:1px solid var(--border)}
+.modal-footer{border-top:1px solid var(--border);border-bottom:0;display:flex;justify-content:flex-end;gap:var(--space-3);background:color-mix(in lab,var(--panel),#000 2%)}
+.modal-body{padding:var(--space-5)}
+.modal-overlay.is-open{display:flex}
+.modal-overlay.is-open .modal{transform:translateY(0);opacity:1}
+
+/* -------- JSON viewer -------- */
+.code,pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-variant-numeric:tabular-nums}
+.json-viewer{background:color-mix(in lab,var(--panel),#000 4%);border:1px solid var(--border);padding:var(--space-4);border-radius:var(--radius-sm);overflow:auto;max-height:60vh}
+.json-viewer pre{margin:0;white-space:pre-wrap;word-break:break-word}
+
+/* -------- Utilities -------- */
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-5)}
+.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-5)}
+@media (max-width:980px){.grid-2,.grid-3{grid-template-columns:1fr}}
+.flex{display:flex;gap:var(--space-4)}
+.flex-center{align-items:center}
+.stack{display:grid;gap:var(--space-5)}
+.sep{height:1px;background:var(--border);margin:var(--space-4) 0}
+.mt-2{margin-top:var(--space-2)} .mt-3{margin-top:var(--space-3)} .mt-4{margin-top:var(--space-4)} .mt-6{margin-top:var(--space-6)} .mt-8{margin-top:var(--space-8)}
+.mb-2{margin-bottom:var(--space-2)} .mb-3{margin-bottom:var(--space-3)} .mb-4{margin-bottom:var(--space-4)} .mb-6{margin-bottom:var(--space-6)} .mb-8{margin-bottom:var(--space-8)}
+.p-4{padding:var(--space-4)} .p-5{padding:var(--space-5)} .p-6{padding:var(--space-6)} .px-6{padding-left:var(--space-6);padding-right:var(--space-6)} .py-4{padding-top:var(--space-4);padding-bottom:var(--space-4)}
+.hide{display:none!important}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+
+/* -------- Toast (ใหม่) -------- */
+.toast{position:fixed;top:20px;right:20px;background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow-lg);border-radius:var(--radius-sm);padding:10px 14px;display:flex;align-items:center;gap:10px;z-index:200;opacity:0;transform:translateY(-6px);animation:toast-in .18s ease forwards}
+.toast.success{border-color:color-mix(in lab,var(--accent),#000 16%)}
+.toast.error{border-color:color-mix(in lab,var(--danger),#000 16%)}
+@keyframes toast-in{to{opacity:1;transform:translateY(0)}}
+
+/* -------- Print -------- */
+@media print{
+  :root{--bg:#fff;--panel:#fff;--text:#000;--muted:#555;--border:#ddd}
+  body{background:#fff}
+  .app-header,.sidebar,.dropzone,.btn,.alert,.modal-overlay,.toast{display:none!important}
+  .container{max-width:none;padding:0}
+  .card,.json-viewer{box-shadow:none;border:0}
+  a{color:inherit;text-decoration:none}
+}
+
+/* คุมความกว้างและระยะห่างซ้าย-ขวาด้วยตัวแปรเดียว */
+:root{
+  /* ปรับเลขนี้ได้ตามใจ: 1360–1600px กำลังสวย */
+  --container-max: 1600px;
+  --page-pad: 1px;   /* ระยะห่างจากขอบซ้าย-ขวา */
+}
+
+/* ขยายคอนเทนเนอร์หลักให้กว้างขึ้น และลด padding ข้าง */
+.container{
+  max-width: var(--container-max);
+  padding-left: var(--page-pad);
+  padding-right: var(--page-pad);
+}
+
+/* ให้แถบ Header ด้านบนจัดกึ่งกลางและใช้ความกว้างเดียวกับหน้าหลัก */
+.app-header .inner{
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding-left: var(--page-pad);
+  padding-right: var(--page-pad);
+}
+
+/* ขยายเพิ่มอีกนิดเมื่อจอใหญ่มาก ๆ */
+@media (min-width: 1660px){
+  :root{ --container-max: 1560px; }
+}
+
+/* === Wider LEFT column (override) ===================== */
+/* ปรับเลขตรงนี้ได้ตามชอบ */
+:root{
+  --left-col: 1500px;        /* เดิม 280px → กว้างขึ้น */
+}
+
+/* ใช้ความกว้างใหม่กับเลย์เอาต์หลัก */
+.layout{
+  grid-template-columns: var(--left-col) 1fr;
+}
+
+/* จอใหญ่มากๆ ขยายเพิ่มอีกนิด */
+@media (min-width: 1400px){
+  :root{ --left-col: 420px; }
+}
+
+/* มือถือ/จอแคบยังเป็น 1 คอลัมน์เหมือนเดิม */
+@media (max-width: 980px){
+  .layout{ grid-template-columns: 1fr; }
+}
+
+/* ========== Professional Toast System (Glass + Icons + Life Bar) ========== */
+
+/* Container รองรับหลาย toast ซ้อนกัน และคลิกทะลุพื้นหลังได้ */
+.toaster{
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  gap: 12px;
+  z-index: 3000;
+  pointer-events: none; /* ให้คลิก UI ข้างใต้ได้ */
+}
+
+/* ตัวการ์ด toast */
+.toast{
+  --toast-life: 2.6s;                    /* ให้ตรงกับ setTimeout(2600) */
+  --bg1: color-mix(in lab, var(--panel), #000 0%);
+  --bg2: color-mix(in lab, var(--panel), #000 4%);
+  --bd:  color-mix(in lab, var(--border), #000 12%);
+  --fg:  var(--text);
+
+  position: relative;
+  pointer-events: auto;                  /* ให้คลิกปุ่ม close ได้ */
+  display: grid;
+  grid-template-columns: 24px 1fr auto;  /* ไอคอน (CSS mask) + ข้อความ + ปุ่มปิด */
+  align-items: center;
+  gap: 12px;
+
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--bd);
+  color: var(--fg);
+  background:
+    linear-gradient(180deg, var(--bg1), var(--bg2));
+  box-shadow:
+    0 10px 30px rgba(15,23,42,.16),
+    0 1px 0 rgba(255,255,255,.4) inset;
+  backdrop-filter: saturate(160%) blur(10px);
+  overflow: hidden;
+
+  /* entrance animation */
+  transform: translateY(-8px) scale(.98);
+  opacity: 0;
+  animation: toast-in .22s cubic-bezier(.2,.8,.2,1) forwards;
+}
+
+/* ไอคอน (ใช้ CSS mask + data-uri SVG) */
+.toast::before{
+  content: "";
+  width: 20px;
+  height: 20px;
+  background: currentColor;
+  -webkit-mask: var(--icon) center/contain no-repeat;
+          mask: var(--icon) center/contain no-repeat;
+  opacity: .95;
+}
+
+/* แถบเวลานับถอยหลังด้านล่าง */
+.toast::after{
+  content: "";
+  position: absolute;
+  left: 0; bottom: 0;
+  height: 3px;
+  background: currentColor;
+  opacity: .38;
+  width: 100%;
+  transform-origin: left;
+  animation: toast-life var(--toast-life) linear forwards;
+}
+
+/* เนื้อความ */
+.toast .msg{
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+
+/* ปุ่มปิด */
+.toast .close{
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: .55;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: background .2s ease, opacity .2s ease;
+}
+.toast .close:hover{ opacity: 1; background: color-mix(in lab, currentColor, transparent 90%); }
+
+/* Variants -------------------------------------------------- */
+.toast--success{
+  --bg1: color-mix(in lab, var(--panel), #10b981 6%);
+  --bg2: color-mix(in lab, var(--panel), #10b981 0%);
+  --bd:  color-mix(in lab, #059669, #000 18%);
+  --fg:  color-mix(in lab, #065f46, #000 0%);
+  --icon: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23000" d="M9.2 16.2 4.9 11.9l1.4-1.4 2.9 2.9 8-8 1.4 1.4z"/></svg>');
+}
+.toast--error{
+  --bg1: color-mix(in lab, var(--panel), #ef4444 7%);
+  --bg2: color-mix(in lab, var(--panel), #ef4444 0%);
+  --bd:  color-mix(in lab, #b91c1c, #000 18%);
+  --fg:  color-mix(in lab, #7f1d1d, #000 0%);
+  --icon: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23000" d="M7.05 5.64 5.64 7.05 10.59 12l-4.95 4.95 1.41 1.41L12 13.41l4.95 4.95 1.41-1.41L13.41 12l4.95-4.95-1.41-1.41L12 10.59 7.05 5.64z"/></svg>');
+}
+.toast--info{
+  --bg1: color-mix(in lab, var(--panel), #3b82f6 6%);
+  --bg2: color-mix(in lab, var(--panel), #3b82f6 0%);
+  --bd:  color-mix(in lab, #2563eb, #000 18%);
+  --fg:  color-mix(in lab, #1e3a8a, #000 0%);
+  --icon: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23000" d="M11 7h2v2h-2V7zm0 4h2v6h-2v-6z"/></svg>');
+}
+
+/* Dark mode tuning */
+@media (prefers-color-scheme: dark){
+  .toast{
+    --bg1: color-mix(in lab, var(--panel), #fff 4%);
+    --bg2: color-mix(in lab, var(--panel), #fff 0%);
+    --bd:  color-mix(in lab, var(--border), #fff 8%);
+  }
+}
+
+/* Exit (ถ้าต้องการใช้งาน ให้เติมคลาส .out ก่อนถอด element) */
+.toast.out{
+  animation: toast-out .18s ease forwards;
+}
+@keyframes toast-in{to{opacity:1; transform:translateY(0) scale(1)}}
+@keyframes toast-out{to{opacity:0; transform:translateY(-8px) scale(.98)}}
+/* life bar: หดจากซ้าย→ขวา */
+@keyframes toast-life{to{width:0%}}
+
+@media (prefers-reduced-motion: reduce){
+  .toast{animation:none; opacity:1; transform:none}
+  .toast::after{animation:none; width:0}
+}

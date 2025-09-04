@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Script from "next/script";
+import './styles/app.minimal.pro.css'; 
 
 export const metadata: Metadata = {
   title: "DocScan OCR (tha+eng) | Next.js Starter",

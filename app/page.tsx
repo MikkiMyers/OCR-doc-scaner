@@ -1,31 +1,47 @@
 'use client';
-
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Spinner from '@/components/Spinner';
 import { Download, Image as ImageIcon, ScanLine } from 'lucide-react';
 import { createWorker, PSM } from 'tesseract.js';
 import { smartParse, SmartFields, LineItem as SmartLineItem } from '@/lib/smartParser';
 import { parseInvoice } from '@/lib/invoiceParser';
 
-declare global {
-  interface Window { cv: any }
-}
+declare global { interface Window { cv: any } }
 
 type OCRState = 'idle' | 'preprocess' | 'ocr' | 'done' | 'error';
 type OCRProgress = { stage: OCRState; progress: number; message?: string };
 
-/* ---------- utils (ประกาศนอก component ให้ stable) ---------- */
+/* ---------- StatusBar (UI สถานะ + แถบเปอร์เซ็นต์) ---------- */
+function StatusBar({ s }: { s: OCRProgress }) {
+  const pct = Math.round((s.progress || 0) * 100);
+  const label =
+    s.stage === 'idle' ? 'รออัปโหลด' :
+    s.stage === 'preprocess' ? 'กำลังเตรียมภาพ' :
+    s.stage === 'ocr' ? 'กำลังอ่านตัวอักษร' :
+    s.stage === 'done' ? 'เสร็จสมบูรณ์' : 'เกิดข้อผิดพลาด';
+
+  return (
+    <div className={`status status--${s.stage}`}>
+      <span className="dot" />
+      <span className="label">{label}</span>
+      {(s.stage === 'preprocess' || s.stage === 'ocr') && (
+        <>
+          <div className="progress-inline"><span style={{ width: `${pct}%` }} /></div>
+          <span className="pct">{pct}%</span>
+        </>
+      )}
+      {s.stage === 'error' && <span className="pct">—</span>}
+      {s.message && <span className="small muted">{s.message}</span>}
+    </div>
+  );
+}
+
+/* ---------- utils ---------- */
 const dataURLBytes = (d: string) => {
   const i = d.indexOf(','); const b64 = i >= 0 ? d.slice(i + 1) : d;
   return Math.ceil((b64.length * 3) / 4);
 };
 const loadImageFromDataURL = (d: string) =>
-  new Promise<HTMLImageElement>((res, rej) => {
-    const im = new Image();
-    im.onload = () => res(im);
-    im.onerror = rej;
-    im.src = d;
-  });
+  new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = d; });
 
 export default function Page() {
   const [imageURL, setImageURL] = useState<string | null>(null);
@@ -33,14 +49,15 @@ export default function Page() {
   const [text, setText] = useState<string>('');
   const [status, setStatus] = useState<OCRProgress>({ stage: 'idle', progress: 0 });
   const [cvReady, setCvReady] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
-  // ภาษาเอกสาร: auto = tha+eng
   const [ocrLang, setOcrLang] = useState<'auto' | 'tha' | 'eng' | 'tha+eng'>('auto');
 
-  // smart parser outputs
   const [sections, setSections] = useState<{ heading: string; content: string[] }[]>([]);
   const [docFields, setDocFields] = useState<SmartFields | null>(null);
   const [lineItems, setLineItems] = useState<SmartLineItem[]>([]);
+
+  const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -51,9 +68,7 @@ export default function Page() {
     const check = () => {
       const ok = typeof window !== 'undefined' && !!window.cv && !!window.cv.Mat;
       if (ok) {
-        if (window.cv.onRuntimeInitialized) {
-          window.cv.onRuntimeInitialized = () => setCvReady(true);
-        }
+        if (window.cv.onRuntimeInitialized) window.cv.onRuntimeInitialized = () => setCvReady(true);
         setCvReady(true);
         clearInterval(interval);
       }
@@ -62,7 +77,16 @@ export default function Page() {
     return () => clearInterval(interval);
   }, []);
 
-  /* ---------- Tesseract worker cache ตามภาษา ---------- */
+  /* ---------- Toast เมื่อเสร็จ ---------- */
+  useEffect(() => {
+    if (status.stage === 'done') {
+      setToast({ type: 'success', message: 'ประมวลผลเสร็จแล้ว' });
+      const t = setTimeout(() => setToast(null), 2600);
+      return () => clearTimeout(t);
+    }
+  }, [status.stage]);
+
+  /* ---------- Tesseract workers ---------- */
   const workersRef = useRef<Record<string, Promise<any>>>({});
   const getWorker = useCallback((lang: 'tha' | 'eng' | 'tha+eng') => {
     if (!workersRef.current[lang]) {
@@ -70,11 +94,7 @@ export default function Page() {
         lang,
         undefined,
         {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              setStatus({ stage: 'ocr', progress: m.progress ?? 0 });
-            }
-          },
+          logger: (m) => { if (m.status === 'recognizing text') setStatus({ stage: 'ocr', progress: m.progress ?? 0 }); },
           workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
           corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core.wasm.js',
           langPath: 'https://tessdata.projectnaptha.com/4.0.0',
@@ -84,42 +104,34 @@ export default function Page() {
     return workersRef.current[lang];
   }, []);
 
-  /* ---------- basic UI handlers ---------- */
+  /* ---------- basic handlers ---------- */
   const reset = () => {
-    setImageURL(null);
-    setProcessedURL(null);
-    setText('');
-    setSections([]);
-    setDocFields(null);
-    setLineItems([]);
+    setImageURL(null); setProcessedURL(null); setText('');
+    setSections([]); setDocFields(null); setLineItems([]);
     setStatus({ stage: 'idle', progress: 0 });
   };
   const onPickFile = () => inputRef.current?.click();
-  const onFile = useCallback((file: File) => {
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    setImageURL(url);
-  }, []);
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); };
-  const prevent = (e: React.DragEvent<HTMLDivElement>) => e.preventDefault();
+  const onFile = useCallback((file: File) => { if (file) setImageURL(URL.createObjectURL(file)); }, []);
+  const onDrag = {
+    over: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(true); },
+    enter: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(true); },
+    leave: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); },
+    drop: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); },
+  };
 
   /* ---------- helpers ---------- */
   const urlToDataURL = useCallback(async (url: string): Promise<string> => {
     const res = await fetch(url);
     const blob = await res.blob();
     return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject; reader.readAsDataURL(blob);
     });
   }, []);
 
   const tidyText = useCallback((s: string) => {
-    // normalize + แทน spaces พิเศษเป็น space
     s = (s || '').normalize('NFC').replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ');
     s = s.replace(/[ \t]{2,}/g, ' ');
-    // รวมบรรทัด (ยกเว้นหัวข้อ/บูลเล็ต)
     const lines = s.split(/\r?\n/).map(l => l.trim());
     const merged: string[] = [];
     for (const l of lines) {
@@ -131,10 +143,8 @@ export default function Page() {
       else merged[merged.length - 1] += ' ' + l;
     }
     s = merged.join('\n');
-    // ลบช่องว่างระหว่างอักษรไทย
     const THAI = '\u0E00-\u0E7F';
     for (let i = 0; i < 3; i++) s = s.replace(new RegExp(`([${THAI}])\\s+([${THAI}])`, 'gu'), '$1$2');
-    // วรรคตอน
     s = s.replace(/\s+([,.;:!?%)(\]\}”])(?=\s|$)/g, '$1').replace(/([([“])\s+/g, '$1').replace(/ \)/g, ')').replace(/ ,/g, ',');
     return s.trim();
   }, []);
@@ -154,7 +164,7 @@ export default function Page() {
     return out;
   }, []);
 
-  /* ---------- Cloud OCR (OCR.space) ---------- */
+  /* ---------- Cloud OCR ---------- */
   const toOcrSpaceLang = (l: 'auto' | 'tha' | 'eng' | 'tha+eng') => (l === 'auto' ? 'tha,eng' : l.replace('+', ','));
   const cloudOCR = useCallback(async (processedDataURL: string) => {
     setStatus({ stage: 'ocr', progress: 0.01, message: 'กำลังส่งให้โมเดล AI...' });
@@ -175,36 +185,28 @@ export default function Page() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Cloud OCR error');
       return json.text as string;
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    } finally { clearTimeout(timeoutId); }
   }, [compressDataURL, imageURL, urlToDataURL, ocrLang]);
 
-  /* ---------- Core pipeline ---------- */
+  /* ---------- Pipeline ---------- */
   const runPipeline = useCallback(async () => {
     if (!imageURL || !cvReady) return;
-
     try {
       setStatus({ stage: 'preprocess', progress: 0.05, message: 'กำลังเตรียมภาพ...' });
 
-      // โหลดรูป
-      const img = new Image();
-      img.src = imageURL;
+      const img = new Image(); img.src = imageURL;
       await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('โหลดรูปไม่สำเร็จ')); });
 
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d', { willReadFrequently: true } as any) as CanvasRenderingContext2D | null;
       if (!ctx) throw new Error('2D canvas context not available');
 
-      // fit -> วาด
       const scale = Math.min(1200 / img.width, 1200 / img.height, 1);
       const w = Math.round(img.width * scale); const h = Math.round(img.height * scale);
       canvas.width = w; canvas.height = h;
       ctx.drawImage(img, 0, 0, w, h);
 
       const cv = (window as any).cv;
-
-      // OpenCV: gray/blur/edge/contours → warp ถ้าเจอสี่เหลี่ยมใหญ่
       const src = cv.imread(canvas);
       const gray = new cv.Mat(), blur = new cv.Mat(), edged = new cv.Mat();
       const contours = new cv.MatVector(), hierarchy = new cv.Mat();
@@ -247,40 +249,29 @@ export default function Page() {
         warped = src.clone();
       }
 
-      // เตรียมภาพสำหรับ OCR
       const gray0 = new cv.Mat(); cv.cvtColor(warped, gray0, cv.COLOR_RGBA2GRAY, 0);
       const up = new cv.Mat(); cv.resize(gray0, up, new cv.Size(0, 0), 2, 2, cv.INTER_CUBIC);
       const den = new cv.Mat(); cv.bilateralFilter(up, den, 9, 75, 75);
       const bin = new cv.Mat(); cv.threshold(den, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.imshow(canvas, bin);
 
-      // cleanup mats
       src.delete(); gray.delete(); blur.delete(); edged.delete();
-      contours.delete(); hierarchy.delete();
-      if (approxCandidate) approxCandidate.delete();
+      contours.delete(); hierarchy.delete(); if (approxCandidate) approxCandidate.delete();
       warped.delete(); gray0.delete(); up.delete(); den.delete(); bin.delete();
 
-      // ส่งเข้า OCR
       const processed = canvas.toDataURL('image/png');
       setProcessedURL(processed);
       setStatus({ stage: 'ocr', progress: 0.0, message: 'กำลังอ่านตัวอักษร...' });
 
       const tesseractLang: 'tha' | 'eng' | 'tha+eng' = ocrLang === 'auto' ? 'tha+eng' : ocrLang;
       const worker = await getWorker(tesseractLang);
-      await worker.setParameters({
-        tessedit_pageseg_mode: PSM.SINGLE_COLUMN,
-        user_defined_dpi: '300',
-        preserve_interword_spaces: '0',
-      });
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_COLUMN, user_defined_dpi: '300', preserve_interword_spaces: '0' });
       if (tesseractLang === 'eng') {
-        await worker.setParameters({
-          tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-–—.,:;!?()[]{}\'"@/&%+*#_$ ',
-        });
+        await worker.setParameters({ tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-–—.,:;!?()[]{}\'\"@/&%+*#_$ ' });
       }
       const { data } = await worker.recognize(processed);
       let out = data.text ?? '';
 
-      // fallback cloud
       const tooShort = (s: string) => !s || s.replace(/\s/g, '').length < 20;
       if (tooShort(out)) {
         try {
@@ -291,29 +282,18 @@ export default function Page() {
             if (!tooShort(cloudRaw) && (cloudRaw.length > (cloud?.length ?? 0))) cloud = cloudRaw;
           }
           if (!tooShort(cloud) && cloud.length > out.length) out = cloud;
-        } catch (e) {
-          console.warn('Cloud OCR fallback failed:', e);
-        }
+        } catch (e) { console.warn('Cloud OCR fallback failed:', e); }
       }
 
-      // ---- tidy + parsing รวมผล invoice + generic ----
       const cleaned = tidyText(out);
       setText(cleaned);
 
-      // 1) parser เฉพาะ invoice
       const inv = parseInvoice(cleaned);
-
-      // 2) parser ทั่วไป (มี sections)
-      const langForSmart: 'auto' | 'tha' | 'eng' =
-        ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
+      const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
       const sp = smartParse(cleaned, { lang: langForSmart });
 
-      // heuristic ว่าเป็น invoice/receipt ไหม
       const looksLikeInvoice =
-        inv.lineItems.length > 0 ||
-        !!inv.fields.total?.value ||
-        !!inv.fields.docNo ||
-        /INVOICE|RECEIPT/i.test(cleaned);
+        inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
 
       const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
       const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
@@ -326,12 +306,12 @@ export default function Page() {
     } catch (err) {
       console.error(err);
       setStatus({ stage: 'error', progress: 0, message: (err as Error).message });
+      setToast({ type: 'error', message: (err as Error)?.message || 'เกิดข้อผิดพลาด' });
     }
   }, [imageURL, cvReady, ocrLang, getWorker, cloudOCR, urlToDataURL, tidyText]);
 
   useEffect(() => { if (imageURL && cvReady) runPipeline(); }, [imageURL, cvReady, runPipeline]);
 
-  /* ---------- download JSON ---------- */
   const downloadJSON = () => {
     const blob = new Blob([JSON.stringify({ text, fields: docFields, lineItems, sections }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -339,207 +319,212 @@ export default function Page() {
   };
 
   return (
-    <main className="max-w-6xl mx-auto p-6">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight">DocScan OCR (ไทย/อังกฤษ)</h1>
-        <p className="text-gray-600 mt-2">
-          อัปโหลดหรือถ่ายภาพเอกสาร → ระบบจะตัดภาพ/ปรับมุมให้อัตโนมัติ แล้วทำ OCR และแยกหัวข้อ/สรุปเอกสารอัจฉริยะ
-        </p>
-      </div>
-
-      <div onDrop={handleDrop} onDragOver={prevent} onDragEnter={prevent} className="border-2 border-dashed rounded-2xl p-8 text-center bg-white shadow-soft">
-        <div className="flex flex-col items-center gap-3">
-          <div className="p-3 rounded-xl bg-gray-100"><ScanLine className="h-7 w-7" /></div>
-          <p className="text-gray-700">ลากรูปมาวางที่นี่ หรือ</p>
-          <button className="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90 transition" onClick={onPickFile}>เลือกรูปเอกสาร</button>
-          <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hidden"
-                 onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
-          <p className="text-xs text-gray-500">รองรับ .jpg .png ขนาดไม่เกิน ~10MB</p>
+    <main className="container">
+      {/* Header */}
+      <header className="app-header">
+        <div className="inner">
+          <div className="logo">DocScan OCR</div>
+          <div className="small muted">ไทย/อังกฤษ · OpenCV + Tesseract · Smart Parser</div>
+          <div className="grow" />
+          <button className="btn btn-outline btn-sm" onClick={downloadJSON} disabled={!text}>
+            <Download size={16}/> ดาวน์โหลด JSON
+          </button>
         </div>
-      </div>
+      </header>
 
-      <div className="grid md:grid-cols-2 gap-6 mt-8">
-        {/* ภาพ */}
-        <div className="bg-white rounded-2xl p-4 shadow-soft">
-          <h2 className="font-semibold mb-3 flex items-center gap-2"><ImageIcon className="h-5 w-5" /> ภาพ</h2>
-          <div className="space-y-4">
-            <div className="rounded-xl overflow-hidden border bg-gray-50 flex items-center justify-center min-h-[240px]">
-              {imageURL ? <img src={imageURL} alt="original" className="max-w-full max-h-[360px]" /> : <div className="text-gray-400">ยังไม่เลือกรูป</div>}
-            </div>
-            <div className="rounded-xl overflow-hidden border bg-gray-50 flex items-center justify-center min-h-[240px]">
-              <canvas ref={canvasRef} className="max-w-full max-h-[360px]" />
-            </div>
-            <div className="flex gap-2">
-              <button onClick={reset} className="px-3 py-2 rounded-lg border hover:bg-gray-50">ล้างค่า</button>
-              <button onClick={runPipeline} className="px-3 py-2 rounded-lg bg-black text-white hover:opacity-90" disabled={!imageURL || !cvReady}>ประมวลผลอีกครั้ง</button>
-            </div>
-            <div className="text-sm text-gray-600">
-              สถานะ{' '}
-              {status.stage === 'idle' && 'รออัปโหลด'}
-              {status.stage !== 'idle' && (
-                <span className="inline-flex items-center gap-2">
-                  {status.stage !== 'done' && status.stage !== 'error' && <Spinner />}
-                  {status.stage === 'preprocess' && `เตรียมภาพ (${Math.round((status.progress || 0) * 100)}%)`}
-                  {status.stage === 'ocr' && `อ่านตัวอักษร (${Math.round((status.progress || 0) * 100)}%)`}
-                  {status.stage === 'done' && 'เสร็จสมบูรณ์'}
-                  {status.stage === 'error' && `ผิดพลาด: ${status.message}`}
-                </span>
-              )}
+      {/* Dropzone */}
+      <section
+        className={`dropzone ${dragOver ? 'is-dragover' : ''} mt-6`}
+        onDragOver={onDrag.over} onDragEnter={onDrag.enter} onDragLeave={onDrag.leave} onDrop={onDrag.drop}
+      >
+        <div className="stack">
+          <div className="flex flex-center">
+            <div className="badge"><ScanLine size={16}/> อัปโหลดเอกสาร</div>
+          </div>
+          <div className="muted">ลากไฟล์มาวางที่นี่ หรือ</div>
+          <div>
+            <button className="btn btn-primary" onClick={onPickFile}>เลือกไฟล์</button>
+            <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hide"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+          </div>
+          <div className="small muted">รองรับ .jpg / .png ขนาดไม่เกิน ~10MB</div>
+        </div>
+      </section>
+
+      {/* Two-column layout */}
+      <section className="layout mt-6">
+        {/* Left: Images */}
+        <div className="stack">
+          <div className="card">
+            <div className="card-header"><div className="card-title flex flex-center"><ImageIcon size={18}/> ภาพต้นฉบับ</div></div>
+            <div className="card-body">
+              <div className="media-box">
+                {imageURL ? <img src={imageURL} alt="original" /> : <div className="small muted p-4">ยังไม่เลือกรูป</div>}
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* ผลลัพธ์ */}
-        <div className="bg-white rounded-2xl p-4 shadow-soft">
-          <h2 className="font-semibold mb-3">ผลลัพธ์ OCR</h2>
-
-          {/* แถบควบคุม */}
-          <div className="flex gap-2 mb-3 items-center flex-wrap">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-600">ภาษาเอกสาร:</span>
-              <select
-                value={ocrLang}
-                onChange={(e) => setOcrLang(e.target.value as any)}
-                className="px-2 py-1 border rounded-lg text-sm"
-                title="เลือกภาษาเอกสารเพื่อความแม่นยำ"
-              >
-                <option value="auto">Auto</option>
-                <option value="tha">ไทย (tha)</option>
-                <option value="eng">อังกฤษ (eng)</option>
-                <option value="tha+eng">ไทย+อังกฤษ</option>
-              </select>
-            </div>
-
-            <button onClick={downloadJSON} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border hover:bg-gray-50" disabled={!text}>
-              <Download className="h-4 w-4" /> ดาวน์โหลด JSON
-            </button>
-
-            <button
-              onClick={async () => {
-                if (!processedURL) return;
-                try {
-                  const t = await cloudOCR(processedURL);
-                  const cleaned = tidyText(t);
-                  setText(cleaned);
-
-                  const inv = parseInvoice(cleaned);
-                  const langForSmart: 'auto' | 'tha' | 'eng' =
-                    ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
-                  const sp = smartParse(cleaned, { lang: langForSmart });
-
-                  const looksLikeInvoice =
-                    inv.lineItems.length > 0 ||
-                    !!inv.fields.total?.value ||
-                    !!inv.fields.docNo ||
-                    /INVOICE|RECEIPT/i.test(cleaned);
-
-                  const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
-                  const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
-
-                  setSections(sp.sections);
-                  setDocFields(finalFields);
-                  setLineItems(finalLineItems);
-
-                  setStatus({ stage: 'done', progress: 1 });
-                } catch (e: any) {
-                  alert(`Cloud OCR error: ${e?.message || e}`);
-                  setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
-                }
-              }}
-              className="px-3 py-2 rounded-lg border hover:bg-gray-50"
-              disabled={!processedURL}
-            >
-              ลอง AI OCR (คลาวด์)
-            </button>
-          </div>
-
-          {/* Smart summary */}
-          {docFields && docFields.docType !== 'generic' && (
-            <div className="mb-4 p-3 border rounded-lg bg-gray-50 text-sm">
-              <div className="font-semibold mb-1">สรุปเอกสาร (Smart Parser)</div>
-              <div><b>ชนิดเอกสาร:</b> {docFields.docType}</div>
-              {docFields.docNo && <div><b>เลขที่:</b> {docFields.docNo}</div>}
-              {docFields.date && <div><b>วันที่:</b> {docFields.date}</div>}
-              {docFields.dueDate && <div><b>กำหนดชำระ:</b> {docFields.dueDate}</div>}
-              {(docFields.seller || docFields.buyer) && (
-                <>
-                  {docFields.seller && <div><b>ผู้ขาย/ผู้ให้บริการ:</b> {docFields.seller}</div>}
-                  {docFields.buyer && <div><b>ผู้ซื้อ/ลูกค้า:</b> {docFields.buyer}</div>}
-                </>
-              )}
-              {(docFields.subtotal || docFields.vat || docFields.total) && (
-                <>
-                  {docFields.subtotal?.text && <div><b>Subtotal:</b> {docFields.subtotal.text}</div>}
-                  {docFields.vat?.text && <div><b>VAT:</b> {docFields.vat.text}</div>}
-                  {docFields.total?.text && <div><b>Total:</b> {docFields.total.text}</div>}
-                </>
-              )}
-              {(docFields.subject || docFields.recipient || docFields.sender) && (
-                <>
-                {docFields.subject && <div><b>เรื่อง/Subject:</b> {docFields.subject}</div>}
-                {docFields.recipient && <div><b>เรียน/Dear:</b> {docFields.recipient}</div>}
-                {docFields.sender && <div><b>ผู้ส่ง/ลงชื่อ:</b> {docFields.sender}</div>}
-                </>
-              )}
-            </div>
-          )}
-
-          {lineItems?.length ? (
-            <div className="overflow-x-auto mb-4">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b bg-gray-50">
-                    <th className="text-left p-2">รายการ</th>
-                    <th className="text-right p-2">จำนวน</th>
-                    <th className="text-right p-2">ราคาต่อหน่วย</th>
-                    <th className="text-right p-2">เป็นเงิน</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {lineItems.map((it, i) => (
-                    <tr key={i} className="border-b">
-                      <td className="p-2">{it.description}</td>
-                      <td className="p-2 text-right">{it.qty ?? ''}</td>
-                      <td className="p-2 text-right">{it.unitPrice ?? ''}</td>
-                      <td className="p-2 text-right">{it.amount ?? ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-
-          {/* ข้อความดิบ + หัวข้อ */}
-          <div className="space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-600">ข้อความดิบ</h3>
-              <pre className="mt-1 p-3 bg-gray-50 rounded-lg max-h-64 overflow-auto text-sm whitespace-pre-wrap">
-                {text || '—'}
-              </pre>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-semibold text-gray-600">แยกเป็นหัวข้อ (heuristic)</h3>
-              <div className="mt-2 space-y-3">
-                {sections.length ? sections.map((s, i) => (
-                  <div key={i} className="border rounded-lg p-3">
-                    <div className="font-semibold">{s.heading}</div>
-                    {s.content.length ? (
-                      <ul className="list-disc ml-6 mt-2 space-y-1">
-                        {s.content.map((c, ci) => (<li key={ci} className="text-sm">{c}</li>))}
-                      </ul>
-                    ) : <div className="text-sm text-gray-500 mt-2">—</div>}
-                  </div>
-                )) : <div className="text-gray-500">—</div>}
+          <div className="card">
+            <div className="card-header"><div className="card-title">ภาพหลังปรับ (สำหรับ OCR)</div></div>
+            <div className="card-body">
+              <div className="media-box">
+                <canvas ref={canvasRef} style={{ width: '100%' }} />
+              </div>
+              <div className="flex mt-4">
+                <button onClick={reset} className="btn btn-outline">ล้างค่า</button>
+                <button onClick={runPipeline} className="btn btn-primary" disabled={!imageURL || !cvReady}>ประมวลผลอีกครั้ง</button>
+              </div>
+              <div className="mt-3">
+                <StatusBar s={status} />
               </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <div className="mt-10 text-xs text-gray-500">
-        หมายเหตุ: ใช้ OpenCV.js จาก CDN และ Tesseract.js (โหลดไฟล์ภาษาตามที่เลือก) — ประมวลผลบนเบราว์เซอร์ทั้งหมด
-      </div>
+        {/* Right: Results */}
+        <div className="stack">
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title">ผลลัพธ์ OCR</div>
+              <div className="flex flex-center">
+                <span className="small muted">ภาษาเอกสาร</span>
+                <select value={ocrLang} onChange={(e) => setOcrLang(e.target.value as any)} className="select" style={{width:160}}>
+                  <option value="auto">Auto</option>
+                  <option value="tha">ไทย (tha)</option>
+                  <option value="eng">อังกฤษ (eng)</option>
+                  <option value="tha+eng">ไทย+อังกฤษ</option>
+                </select>
+                <button
+                  onClick={async () => {
+                    if (!processedURL) return;
+                    try {
+                      const t = await cloudOCR(processedURL);
+                      const cleaned = tidyText(t);
+                      setText(cleaned);
+
+                      const inv = parseInvoice(cleaned);
+                      const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
+                      const sp = smartParse(cleaned, { lang: langForSmart });
+
+                      const looksLikeInvoice = inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
+                      const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
+                      const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
+
+                      setSections(sp.sections); setDocFields(finalFields); setLineItems(finalLineItems);
+                      setStatus({ stage: 'done', progress: 1 });
+                    } catch (e: any) {
+                      setToast({ type: 'error', message: e?.message || 'Cloud OCR error' });
+                      setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
+                    }
+                  }}
+                  className="btn btn-outline"
+                  disabled={!processedURL}
+                >
+                  ลอง AI OCR (คลาวด์)
+                </button>
+              </div>
+            </div>
+
+            <div className="card-body">
+              {/* Smart summary */}
+              {docFields && docFields.docType !== 'generic' && (
+                <div className="alert">
+                  <div className="stack">
+                    <div className="title">สรุปเอกสาร (Smart Parser)</div>
+                    <div className="small"><b>ชนิดเอกสาร:</b> {docFields.docType}</div>
+                    {docFields.docNo && <div className="small"><b>เลขที่:</b> {docFields.docNo}</div>}
+                    {docFields.date && <div className="small"><b>วันที่:</b> {docFields.date}</div>}
+                    {docFields.dueDate && <div className="small"><b>กำหนดชำระ:</b> {docFields.dueDate}</div>}
+                    {(docFields.seller || docFields.buyer) && (
+                      <>
+                        {docFields.seller && <div className="small"><b>ผู้ขาย/ผู้ให้บริการ:</b> {docFields.seller}</div>}
+                        {docFields.buyer && <div className="small"><b>ผู้ซื้อ/ลูกค้า:</b> {docFields.buyer}</div>}
+                      </>
+                    )}
+                    {(docFields.subtotal || docFields.vat || docFields.total) && (
+                      <>
+                        {docFields.subtotal?.text && <div className="small"><b>Subtotal:</b> {docFields.subtotal.text}</div>}
+                        {docFields.vat?.text && <div className="small"><b>VAT:</b> {docFields.vat.text}</div>}
+                        {docFields.total?.text && <div className="small"><b>Total:</b> {docFields.total.text}</div>}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {lineItems?.length ? (
+                <div className="mt-4">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>รายการ</th>
+                        <th className="num">จำนวน</th>
+                        <th className="num">ราคาต่อหน่วย</th>
+                        <th className="num">เป็นเงิน</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lineItems.map((it, i) => (
+                        <tr key={i}>
+                          <td>{it.description}</td>
+                          <td className="num">{it.qty ?? ''}</td>
+                          <td className="num">{it.unitPrice ?? ''}</td>
+                          <td className="num">{it.amount ?? ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+
+              {/* Raw text + sections */}
+              <div className="grid-2 mt-6">
+                <div>
+                  <h3 className="small muted">ข้อความดิบ</h3>
+                  <div className="json-viewer mt-2"><pre><code>{text || '—'}</code></pre></div>
+                </div>
+                <div>
+                  <h3 className="small muted">แยกเป็นหัวข้อ (heuristic)</h3>
+                  <div className="stack mt-2">
+                    {sections.length ? sections.map((s, i) => (
+                      <div key={i} className="card">
+                        <div className="card-header"><div className="card-title">{s.heading}</div></div>
+                        <div className="card-body">
+                          {s.content.length ? (
+                            <ul className="stack" style={{paddingLeft: '1rem', listStyle: 'disc'}}>
+                              {s.content.map((c, ci) => (<li key={ci} className="small">{c}</li>))}
+                            </ul>
+                          ) : <div className="small muted">—</div>}
+                        </div>
+                      </div>
+                    )) : <div className="small muted">—</div>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card-footer small muted">
+              ใช้ OpenCV.js + Tesseract.js — ประมวลผลบนเบราว์เซอร์ทั้งหมด
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Toast */}
+      {toast && (
+        <div className="toaster" aria-live="polite" aria-atomic="true">
+          <div className={`toast toast--${toast.type}`} role="status">
+            <span className="msg">{toast.message}</span>
+            <button
+              className="close"
+              aria-label="ปิดการแจ้งเตือน"
+              onClick={() => setToast(null)}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
