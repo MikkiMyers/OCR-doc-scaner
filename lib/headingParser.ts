@@ -1,286 +1,103 @@
-import { parseHeadings, ParsedSection } from "./headingParser";
-
 /** ===== Types ===== */
-export type DocType = "receipt" | "invoice" | "business_letter" | "generic";
-
-export type Money = { value?: number; text?: string; currency?: string };
-export type LineItem = {
-  description: string;
-  qty?: number;
-  unitPrice?: number;
-  amount?: number;
-};
-
-export type SmartFields = {
-  // common
-  docType: DocType;
-  docNo?: string;
-  date?: string;
-  dueDate?: string;
-
-  // parties
-  seller?: string;
-  buyer?: string;
-  taxIdSeller?: string;
-  taxIdBuyer?: string;
-  addressSeller?: string;
-  addressBuyer?: string;
-
-  // totals
-  subtotal?: Money;
-  vat?: Money;
-  total?: Money;
-  currency?: string;
-
-  // business letter
-  subject?: string; // เรื่อง / Subject
-  recipient?: string; // เรียน / Dear
-  sender?: string; // ลงชื่อ
-};
-
-export type SmartParseResult = {
-  fields: SmartFields;
-  lineItems?: LineItem[];
-  sections: ParsedSection[];
-};
+export interface ParsedSection {
+  heading: string;
+  content: string[];
+}
 
 /** ===== Helpers ===== */
-const NUM = /[\d.,]+/;
-const MONEY = /[A-Z]{3}|\฿|\$|€|£/i;
+const isMostlyUpper = (s: string) => {
+  const letters = s.replace(/[^A-Za-z]/g, '');
+  if (letters.length < 4) return false;
+  const uppers = letters.replace(/[^A-Z]/g, '').length;
+  return uppers / letters.length >= 0.75;
+};
 
-function toNumber(s?: string): number | undefined {
-  if (!s) return undefined;
-  const n = Number(s.replace(/[, ]/g, ""));
-  return isFinite(n) ? n : undefined;
-}
+const normalize = (s: string) =>
+  (s || '')
+    .normalize('NFC')
+    .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 
-function findOne(re: RegExp, text: string, g = 2): string | undefined {
-  const m = text.match(re);
-  return m ? (m[g] || m[1])?.trim() : undefined;
-}
+/** ตรวจว่าเป็นหัวข้อไหม (TH/EN) */
+const isHeadingLine = (line: string): boolean => {
+  const l = line.trim();
 
-function has(text: string, kws: string[]) {
-  const t = text.toUpperCase();
-  return kws.some((k) => t.includes(k.toUpperCase()));
-}
+  if (!l) return false;
 
-/** ===== Doc classifier ===== */
-function classify(text: string): DocType {
-  const T = text.toUpperCase();
+  // รูปแบบทั่วไป: คำขึ้นต้น + ":" หรือ ลงท้าย ":" / "--"
+  if (/^.{2,40}[:：]\s*$/.test(l)) return true;
+
+  // All-caps (อังกฤษ) ยาวพอสมควร
+  if (isMostlyUpper(l)) return true;
+
+  // คีย์เวิร์ดหัวข้อไทย/อังกฤษยอดฮิต
   if (
-    has(T, [
-      "TAX INVOICE",
-      "INVOICE",
-      "ใบกำกับภาษี",
-      "ใบเสร็จรับเงิน",
-      "RECEIPT",
-      "CASH RECEIPT",
-      "ใบรับเงิน",
-    ])
+    /^(เนื้อหา|หัวข้อ|สรุป|หมายเหตุ|รายละเอียด|ข้อมูล|ภาคผนวก|อ้างอิง)\b/.test(l) ||
+    /^(SUMMARY|ABSTRACT|INTRODUCTION|EDUCATION|EXPERIENCE|PROJECTS?|SKILLS|CERTIFICATIONS?|ADDITIONAL INFORMATION|INVOICE|RECEIPT|BILL TO|SHIP TO|ISSUED TO|PAY TO|TOTAL|SUBTOTAL)\b/i.test(
+      l
+    )
   ) {
-    // ถ้าเจอคำว่า INVOICE/RECEIPT ชัดๆ
-    if (has(T, ["RECEIPT", "ใบเสร็จรับเงิน"])) return "receipt";
-    if (has(T, ["INVOICE", "TAX INVOICE", "ใบกำกับภาษี"])) return "invoice";
-    return "invoice";
-  }
-  if (has(T, ["SUBJECT:", "เรื่อง:", "เรียน ", "DEAR ", "SINCERELY", "ขอแสดงความนับถือ"])) {
-    return "business_letter";
-  }
-  return "generic";
-}
-
-/** ===== Extractors ===== */
-function extractReceiptOrInvoice(text: string): {
-  fields: SmartFields;
-  lineItems: LineItem[];
-} {
-  // header block
-  const fields: SmartFields = {
-    docType: classify(text),
-  };
-
-  // doc no.
-  fields.docNo =
-    findOne(/(?:เลขที่(?:เอกสาร)?|ใบเสร็จ|เลขที่ใบกำกับ|INVOICE\s*NO\.?|RECEIPT\s*NO\.?|NO\.?)\s*[:#]?\s*([A-Z0-9\-\/]+)/i, text, 1) ||
-    undefined;
-
-  // dates
-  fields.date =
-    findOne(
-      /(?:วันที่|ออกวันที่|INVOICE\s*DATE|DATE)\s*[:\-]?\s*([0-9]{1,2}[\/\-][0-9]{1,2}[\/\-][0-9]{2,4}|[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}|[0-9\-]{8,10})/i,
-      text,
-      1
-    ) || undefined;
-
-  fields.dueDate =
-    findOne(
-      /(?:ครบกำหนด|กำหนดชำระ|DUE\s*DATE)\s*[:\-]?\s*([0-9]{1,2}[\/\-][0-9]{1,2}[\/\-][0-9]{2,4}|[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}|[0-9\-]{8,10})/i,
-      text,
-      1
-    ) || undefined;
-
-  // parties & tax id
-  fields.taxIdSeller = findOne(/(?:เลขประจำตัวผู้เสียภาษี|TAX\s*ID)\s*[:\-]?\s*([0-9\-]+)/i, text, 1) || undefined;
-  fields.taxIdBuyer = findOne(/(?:Tax\s*ID\s*\(Buyer\)|Tax\s*ID\s*:\s*Buyer)\s*[:\-]?\s*([0-9\-]+)/i, text, 1) || undefined;
-
-  // Simple guesses for seller/buyer blocks
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const sellerIdx = lines.findIndex((l) => has(l, ["ผู้ขาย", "ผู้ประกอบการ", "SELLER"]));
-  if (sellerIdx >= 0) {
-    fields.seller = lines.slice(sellerIdx, sellerIdx + 3).join(" ");
-  }
-  const buyerIdx = lines.findIndex((l) => has(l, ["ผู้ซื้อ", "ลูกค้า", "BUYER", "CUSTOMER"]));
-  if (buyerIdx >= 0) {
-    fields.buyer = lines.slice(buyerIdx, buyerIdx + 3).join(" ");
+    return true;
   }
 
-  // currency (guess)
-  const currency = (text.match(MONEY)?.[0] || "").toUpperCase();
-  if (currency) fields.currency = currency;
+  // “INVOICE NO ... DATE ...” แบบยาวในบรรทัดเดียว
+  if (/^(INVOICE|RECEIPT)\b.+(DATE|DUE DATE)\b/i.test(l)) return true;
 
-  // totals
-  const subtotalTxt =
-    findOne(/(?:ยอดรวม(?:ก่อนภาษี)?|SUBTOTAL)\s*[:\-]?\s*([0-9,.\s]+)/i, text, 1) || undefined;
-  const vatTxt = findOne(/(?:ภาษีมูลค่าเพิ่ม|VAT)\s*[:\-]?\s*([0-9,.\s]+)/i, text, 1) || undefined;
-  const totalTxt =
-    findOne(/(?:รวมทั้งสิ้น|ยอดชำระ|TOTAL|AMOUNT\s*DUE)\s*[:\-]?\s*([0-9,.\s]+)/i, text, 1) || undefined;
+  return false;
+};
 
-  fields.subtotal = subtotalTxt ? { text: subtotalTxt, value: toNumber(subtotalTxt), currency } : undefined;
-  fields.vat = vatTxt ? { text: vatTxt, value: toNumber(vatTxt), currency } : undefined;
-  fields.total = totalTxt ? { text: totalTxt, value: toNumber(totalTxt), currency } : undefined;
+/** บูลเล็ต/รายการ */
+const isBullet = (line: string): boolean =>
+  /^(\-|\*|•|▪|■|●|○)\s+/.test(line) || // • item
+  /^\(?\d{1,3}\)?[.)]\s+/.test(line) || // 1) / 1. / (1)
+  /^[A-Za-z][.)]\s+/.test(line); // A) / a)
 
-  // line items heuristic
-  const itemLines: LineItem[] = [];
-  for (const raw of lines) {
-    const l = raw.replace(/\s{2,}/g, " ").trim();
-    if (!/\d/.test(l)) continue; // ignore lines without digits
+/** ===== Main parser ===== */
+export function parseHeadings(rawText: string): ParsedSection[] {
+  const text = normalize(rawText);
+  if (!text) return [];
 
-    // patterns:
-    // 1) "desc   qty x price = amount"
-    let m =
-      l.match(/^(.+?)\s+(\d+(?:[\.,]\d+)?)\s*[x×]\s*(\d+(?:[\.,]\d+)?)\s*=\s*(\d+(?:[\.,]\d+)?)(?:\s*.*)?$/i) ||
-      l.match(/^(.+?)\s+(\d+(?:[\.,]\d+)?)\s+(\d+(?:[\.,]\d+)?)\s+(\d+(?:[\.,]\d+)?)$/i);
+  const lines = text.split(/\r?\n/).map((l) => normalize(l));
+  const sections: ParsedSection[] = [];
 
-    if (m) {
-      const [, desc, qty, unit, amt] = m;
-      itemLines.push({
-        description: desc.trim(),
-        qty: toNumber(qty),
-        unitPrice: toNumber(unit),
-        amount: toNumber(amt),
-      });
+  let current: ParsedSection | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l) continue;
+
+    if (isHeadingLine(l)) {
+      // เปิดหัวข้อใหม่
+      current && sections.push(current);
+      current = { heading: l.replace(/\s*[:：]\s*$/, ''), content: [] };
       continue;
     }
 
-    // 2) generic: last number is amount, earlier number maybe qty or unit
-    const nums = l.match(/[\d.,]+/g);
-    if (nums && nums.length >= 1 && /[\d.,]+\s*$/.test(l)) {
-      const amount = toNumber(nums[nums.length - 1]);
-      // description = remove trailing numbers
-      const desc = l.replace(/[\s\d.,]+$/, "").trim();
-      const maybeQty = nums.length >= 2 ? toNumber(nums[0]) : undefined;
-      const maybeUnit = nums.length >= 3 ? toNumber(nums[1]) : undefined;
-      // ต้องมีคำอธิบายและ amount ถึงจะนับเป็น item
-      if (desc && amount !== undefined) {
-        itemLines.push({
-          description: desc,
-          qty: maybeQty,
-          unitPrice: maybeUnit,
-          amount,
-        });
+    // ถ้ายังไม่มีหัวข้อ ให้ยัดไปเป็น "เนื้อหา"
+    if (!current) {
+      current = { heading: 'เนื้อหา', content: [] };
+    }
+
+    // จัดการบูลเล็ต/ข้อความย่อย
+    if (isBullet(l)) {
+      current.content.push(l.replace(/^\(?\d{1,3}\)?[.)]\s+/, '').replace(/^(\-|\*|•|▪|■|●|○)\s+/, ''));
+    } else {
+      // รวมบรรทัดให้เป็นย่อหน้า
+      const last = current.content[current.content.length - 1];
+      if (!last || /[.:;!?。！？]$/.test(last)) {
+        current.content.push(l);
+      } else {
+        current.content[current.content.length - 1] = `${last} ${l}`;
       }
     }
   }
 
-  return { fields, lineItems: itemLines };
-}
+  current && sections.push(current);
 
-function extractBusinessLetter(text: string): { fields: SmartFields } {
-  const fields: SmartFields = { docType: "business_letter" };
-
-  fields.subject =
-    findOne(/(?:เรื่อง|Subject)\s*[:\-]\s*(.+)/i, text, 1) ||
-    // subject on next line
-    findOne(/(?:เรื่อง|Subject)\s*[:\-]?\s*\n(.+)/i, text, 1) ||
-    undefined;
-
-  fields.recipient =
-    findOne(/^(?:เรียน|Dear)\s+(.+)$/im, text, 1) || undefined;
-
-  fields.date =
-    findOne(/^(?:วันที่|Date)\s*[:\-]?\s*(.+)$/im, text, 1) ||
-    findOne(/(?:\bDate\b)\s*[:\-]?\s*(.+)$/i, text, 1) ||
-    undefined;
-
-  // crude sender guess from closing
-  fields.sender =
-    findOne(/(?:ขอแสดงความนับถือ|Sincerely|Best regards)[\s,\n]+(.+)/i, text, 1) || undefined;
-
-  return { fields };
-}
-
-/** ===== Public: smartParse ===== */
-export function smartParse(
-  raw: string,
-  opts?: { lang?: "auto" | "tha" | "eng" }
-): SmartParseResult {
-  const text = raw ?? "";
-  const docType = classify(text);
-
-  let fields: SmartFields = { docType };
-  let lineItems: LineItem[] | undefined;
-
-  if (docType === "receipt" || docType === "invoice") {
-    const ex = extractReceiptOrInvoice(text);
-    fields = { ...fields, ...ex.fields };
-    lineItems = ex.lineItems;
-  } else if (docType === "business_letter") {
-    const ex = extractBusinessLetter(text);
-    fields = { ...fields, ...ex.fields };
-  }
-
-  // sections จากพาร์เซอร์หัวข้อเดิม (เผื่อโชว์สรุป)
-  const sections = parseHeadings(text, [
-    // เสริมหัวข้อที่พบบ่อยในงานธุรกิจ/การเงิน
-    "INVOICE",
-    "TAX INVOICE",
-    "RECEIPT",
-    "BILLING",
-    "PAYMENT",
-    "VENDOR",
-    "CUSTOMER",
-    "TERMS",
-    "TOTAL",
-    "SUBTOTAL",
-    "VAT",
-    "EDUCATION",
-    "EXPERIENCE",
-    "ADDITIONAL INFORMATION",
-    "SKILLS",
-    "SUMMARY",
-    "CONTACT",
-    "PROJECTS",
-    "LANGUAGES",
-    "CERTIFICATIONS",
-    "AWARDS",
-    "PUBLICATIONS",
-
-    // ไทย
-    "ใบกำกับภาษี",
-    "ใบเสร็จรับเงิน",
-    "ผู้ขาย",
-    "ผู้ซื้อ",
-    "เงื่อนไข",
-    "ยอดรวม",
-    "ภาษีมูลค่าเพิ่ม",
-    "รวมทั้งสิ้น",
-    "การศึกษา",
-    "ทักษะ",
-    "ภาษา",
-    "โครงการ",
-    "ข้อมูลเพิ่มเติม",
-    "สรุป",
-  ]);
-
-  return { fields, lineItems, sections };
+  // เก็บกวาด: ตัดช่องว่าง, ตัด content ที่ซ้ำว่าง
+  return sections.map((s) => ({
+    heading: s.heading.trim(),
+    content: s.content.map((c) => c.trim()).filter(Boolean),
+  }));
 }
