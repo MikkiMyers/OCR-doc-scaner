@@ -403,7 +403,7 @@ export default function Page() {
                 className="px-2 py-1 border rounded-lg text-sm"
                 title="เลือกภาษาเอกสารเพื่อความแม่นยำ"
               >
-                <option value="auto">Auto (ไทย+อังกฤษ)</option>
+                <option value="auto">Auto</option>
                 <option value="tha">ไทย (tha)</option>
                 <option value="eng">อังกฤษ (eng)</option>
                 <option value="tha+eng">ไทย+อังกฤษ</option>
