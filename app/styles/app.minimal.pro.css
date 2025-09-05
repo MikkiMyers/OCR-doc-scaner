@@ -1,9 +1,3 @@
-/*
-  Minimal Professional UI Kit (CSS only) — v2
-  - เพิ่ม status pill + inline progress, toast
-  - ปรับ skeleton ให้เป็น static (ไม่มีแสงวูบ)
-*/
-
 *{box-sizing:border-box}
 html,body{height:100%}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
@@ -220,7 +214,7 @@ h3{font-size:clamp(18px,2vw,22px)}
 /* === Wider LEFT column (override) ===================== */
 /* ปรับเลขตรงนี้ได้ตามชอบ */
 :root{
-  --left-col: 1500px;        /* เดิม 280px → กว้างขึ้น */
+  --left-col: 500px;        /* เดิม 280px → กว้างขึ้น */
 }
 
 /* ใช้ความกว้างใหม่กับเลย์เอาต์หลัก */
