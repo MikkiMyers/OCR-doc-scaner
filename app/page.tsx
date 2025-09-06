@@ -5,6 +5,7 @@ import { Download, Image as ImageIcon, ScanLine, Wand2 } from 'lucide-react';
 import { createWorker, PSM } from 'tesseract.js';
 import { smartParse, SmartFields, LineItem as SmartLineItem } from '@/lib/smartParser';
 import { parseInvoice } from '@/lib/invoiceParser';
+import { parseThaiMemo } from '@/lib/headingParser';
 
 declare global { interface Window { cv: any } }
 
@@ -13,7 +14,7 @@ type OCRProgress = { stage: OCRState; progress: number; message?: string };
 
 const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || 'DocScan OCR';
 
-/* -------------------- i18n (TH/EN) -------------------- */
+/* -------------------- i18n -------------------- */
 type Lang = 'th' | 'en';
 const DICT: Record<Lang, Record<string, string>> = {
   th: {
@@ -47,17 +48,22 @@ const DICT: Record<Lang, Record<string, string>> = {
     vat: 'VAT',
     total: 'Total',
     name: 'ชื่อ',
-    title: 'ตำแหน่ง',
+    title: 'ตำแหน่ง (อาชีพ)',
     rawText: 'ข้อความดิบ',
     sections: 'แยกเป็นหัวข้อ (heuristic/AI)',
     downloadJSON: 'ดาวน์โหลด JSON',
     toastDone: 'ประมวลผลเสร็จแล้ว',
     toastRefined: 'ปรับภาษา/จัดหัวข้อสำเร็จ',
     toastRefineFailed: 'AI refine ล้มเหลว',
-    // Invoice specific
     invoiceMeta: 'ข้อมูลใบแจ้งหนี้',
     lineItems: 'รายการ',
     totals: 'สรุปยอด',
+    agency: 'ส่วนราชการ',
+    refNo: 'ที่',
+    memoTitle: 'เรื่อง',
+    to: 'เรียน',
+    signer: 'ลงชื่อ',
+    position: 'ตำแหน่ง',
   },
   en: {
     appTag: 'Thai/English · OpenCV + Tesseract · Smart Parser',
@@ -88,7 +94,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     buyer: 'Buyer/Client',
     subtotal: 'Subtotal',
     vat: 'VAT',
-    total: 'Total',
+    total: 'Totals',
     name: 'Name',
     title: 'Title',
     rawText: 'Raw text',
@@ -100,6 +106,12 @@ const DICT: Record<Lang, Record<string, string>> = {
     invoiceMeta: 'Invoice meta',
     lineItems: 'Line items',
     totals: 'Totals',
+    agency: 'Agency',
+    refNo: 'Ref No.',
+    memoTitle: 'Subject',
+    to: 'To',
+    signer: 'Signer',
+    position: 'Position',
   }
 };
 const useI18n = () => {
@@ -113,7 +125,7 @@ const useI18n = () => {
   return { uiLang, setUiLang, t };
 };
 
-/* -------------------- utils -------------------- */
+/* -------------------- helpers -------------------- */
 const dataURLBytes = (d: string) => {
   const i = d.indexOf(','); const b64 = i >= 0 ? d.slice(i + 1) : d;
   return Math.ceil((b64.length * 3) / 4);
@@ -121,11 +133,30 @@ const dataURLBytes = (d: string) => {
 const loadImageFromDataURL = (d: string) =>
   new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = d; });
 
-/* number format for money-ish */
 const fmtNum = (n: any) => {
   const v = typeof n === 'number' ? n : parseFloat(String(n).replace(/[^0-9.-]/g, ''));
   if (isNaN(v)) return String(n ?? '');
   return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+/* ---- Thai memo heuristic (client) ---- */
+const looksLikeThaiMemoClient = (text: string) => {
+  const t = text || '';
+  if (!/บันทึก\s*ข้อความ/.test(t)) return false;
+  const lines = t.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const pats: Record<string, RegExp[]> = {
+    agency:  [/^ส่วน\s*ราชการ/],
+    refNo:   [/^ที่\b|^ที\b/],
+    date:    [/^วันที่\b|^วันที\b|^วันทึ\b/],
+    title:   [/^เรื่อง\b|^เรือง\b|^เรีอง\b|^เริ่อง\b|^เรียง\b/],
+    to:      [/^เรียน\b|^เรยน\b/],
+    attach:  [/^สิ่ง.?ที่.?ส่งมาด้วย\b|^สิ่งทีส่งมาด้วย\b|^สิ่งที่สงมาด้วย\b/],
+    signer:  [/^ลงชื่อ\b/],
+  };
+  const hit = (k: string) => lines.some(l => pats[k].some(r => r.test(l)));
+  const headerHits = ['agency','refNo','date','title'].filter(hit).length;
+  const bodyHits   = ['to','attach','signer'].filter(hit).length;
+  return headerHits >= 2 && bodyHits >= 1;
 };
 
 export default function Page() {
@@ -140,10 +171,8 @@ export default function Page() {
   const [toast, setToast] = useState<{ type: 'success'|'error'|'info', message: string }|null>(null);
   const [autoAI, setAutoAI] = useState<boolean>(true);
 
-  // doc OCR language (engine)
   const [ocrLang, setOcrLang] = useState<'auto' | 'tha' | 'eng' | 'tha+eng'>('auto');
 
-  // parsed outputs
   const [sections, setSections] = useState<{ heading: string; content: string[] }[]>([]);
   const [docFields, setDocFields] = useState<SmartFields | null>(null);
   const [lineItems, setLineItems] = useState<SmartLineItem[]>([]);
@@ -215,13 +244,22 @@ export default function Page() {
     const merged: string[] = [];
     for (const l of lines) {
       const isBullet = /^[-•▪■●○]|^\d+\)|^\(?\d+\)|^[A-Za-z]\)/.test(l);
-      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประวัติการศึกษา|ทักษะ|ภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|RESUME|INVOICE|RECEIPT|BILL|ISSUED TO|PAY TO|TOTAL|SUBTOTAL)\b/i.test(l);
+      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประวัติการศึกษา|ทักษะ|ภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|RESUME|INVOICE|RECEIPT|BILL|ISSUED TO|PAY TO|TOTAL|SUBTOTAL|ส่วนราชการ|เรื่อง|สิ่งที่ส่งมาด้วย|เรียน|ลงชื่อ|วันที่|ที่)\b/i.test(l);
       if (!l) { merged.push(''); continue; }
       if (isBullet || isHeading) { merged.push(l); continue; }
       if (!merged.length || merged[merged.length - 1] === '') merged.push(l);
       else merged[merged.length - 1] += ' ' + l;
     }
     s = merged.join('\n');
+    const fixes: Array<[RegExp, string]> = [
+      [/^(เรือง|เรีอง|เริ่อง|เรียง)(\s|:)/im, 'เรื่อง$2'],
+      [/^เรยน(\s|:)/im, 'เรียน$1'],
+      [/^วันที(\s|:)/im, 'วันที่$1'],
+      [/^วันทึ(\s|:)/im, 'วันที่$1'],
+      [/^สิ่งทีส่งมาด้วย\b/im, 'สิ่งที่ส่งมาด้วย'],
+      [/^สิ่งที่สงมาด้วย\b/im, 'สิ่งที่ส่งมาด้วย'],
+    ];
+    for (const [re, rep] of fixes) s = s.replace(re, rep);
     const THAI = '\u0E00-\u0E7F';
     for (let i = 0; i < 3; i++) s = s.replace(new RegExp(`([${THAI}])\\s+([${THAI}])`, 'gu'), '$1$2');
     s = s.replace(/\s+([,.;:!?%)(\]\}”])(?=\s|$)/g, '$1').replace(/([([“])\s+/g, '$1').replace(/ \)/g, ')').replace(/ ,/g, ',');
@@ -243,7 +281,7 @@ export default function Page() {
     return out;
   }, []);
 
-  /* ---------- Cloud OCR (OCR.space) ---------- */
+  /* ---------- Cloud OCR ---------- */
   const toOcrSpaceLang = (l: 'auto' | 'tha' | 'eng' | 'tha+eng') => (l === 'auto' ? 'tha,eng' : l.replace('+', ','));
   const cloudOCR = useCallback(async (processedDataURL: string) => {
     setStatus({ stage: 'ocr', progress: 0.01, message: t('reading') });
@@ -268,35 +306,95 @@ export default function Page() {
     } finally { clearTimeout(timeoutId); }
   }, [compressDataURL, imageURL, urlToDataURL, ocrLang, t]);
 
+  /* ---------- client refine fallback ---------- */
+  const clientRefine = useCallback((raw: string) => {
+    const cleaned = tidyText(raw);
+    const inv = parseInvoice(cleaned);
+    const sp  = smartParse(cleaned, { lang: 'auto' });
+
+    const invoiceLike =
+      inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
+    if (invoiceLike) {
+      return {
+        from: 'client-invoice',
+        cleanText: cleaned,
+        fields: { ...inv.fields, docType: 'invoice' as const },
+        lineItems: inv.lineItems,
+        sections: [], // เราสร้าง section ภายนอกอยู่แล้ว
+      };
+    }
+
+    const memoLike = sp?.fields?.docType === 'thai_memo' || looksLikeThaiMemoClient(cleaned);
+    if (memoLike) {
+      const memo = parseThaiMemo(cleaned);
+      return {
+        from: 'client-thai-memo',
+        cleanText: cleaned,
+        fields: { ...(sp.fields || {}), ...(memo.fields || {}), docType: 'thai_memo' as const },
+        lineItems: [],
+        sections: memo.sections || [],
+      };
+    }
+
+    return {
+      from: 'client-generic',
+      cleanText: cleaned,
+      fields: { ...(sp.fields || {}), docType: (sp.fields?.docType as any) || 'generic' },
+      lineItems: sp.lineItems || [],
+      sections: sp.sections || [],
+    };
+  }, [tidyText]);
+
   /* ---------- AI refine (auto/manual) ---------- */
-  const aiRefineCall = useCallback(async (inputText: string, manual = false) => {
+  const aiRefineCall = useCallback(async (inputText: string) => {
     if (!inputText?.trim()) return;
+
+    // absolute URL กัน basePath/proxy
+    const endpoint = (typeof window !== 'undefined')
+      ? new URL('/api/ai-refine', window.location.origin).toString()
+      : '/api/ai-refine';
+
     try {
       setStatus({ stage: 'ocr', progress: 0.01, message: t('reading') });
-      const res = await fetch('/api/ai-refine', {
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
         body: JSON.stringify({ text: inputText }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+
       const raw = await res.text();
       if (!res.ok) throw new Error(raw || `AI refine error: ${res.status}`);
       let json: any; try { json = JSON.parse(raw); } catch { throw new Error(raw || 'bad JSON'); }
       if (!json.ok) throw new Error(json.error || 'AI refine failed');
 
       setText(json.cleanText ?? inputText);
+
       if (Array.isArray(json.sections)) setSections(json.sections);
       if (json.fields) setDocFields(prev => ({ ...(prev || { docType: 'generic' }), ...json.fields }));
+      if (Array.isArray(json.lineItems)) setLineItems(json.lineItems);
+
       setStatus({ stage: 'done', progress: 1 });
       setToast({ type: 'success', message: `${t('toastRefined')} (${json.from || 'local'})` });
       setTimeout(() => setToast(null), 2000);
     } catch (e: any) {
-      setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
-      setToast({ type: 'error', message: `${t('toastRefineFailed')}: ${String(e?.message || e)}` });
-      setTimeout(() => setToast(null), 3400);
+      // ⬇️ fallback ในเครื่องทันที (ไม่พึ่ง API)
+      const local = clientRefine(inputText);
+      setText(local.cleanText);
+      setSections(local.sections);
+      setDocFields(prev => ({ ...(prev || { docType: 'generic' }), ...local.fields }));
+      setLineItems(local.lineItems);
+      setStatus({ stage: 'done', progress: 1 });
+      setToast({ type: 'info', message: `ใช้โหมดสำรองในเครื่อง (${local.from})` });
+      setTimeout(() => setToast(null), 2500);
     }
-  }, [t]);
+  }, [clientRefine, t]);
 
-  /* ---------- Build sections for Invoice (better headings even without AI) ---------- */
+  /* ---------- Build sections for Invoice ---------- */
   const buildInvoiceSections = useCallback((inv: ReturnType<typeof parseInvoice>, lang: Lang) => {
     const L = DICT[lang];
     const s: { heading: string; content: string[] }[] = [];
@@ -416,22 +514,35 @@ export default function Page() {
             if (!tooShort(cloudRaw) && (cloudRaw.length > (cloud?.length ?? 0))) cloud = cloudRaw;
           }
           if (!tooShort(cloud) && cloud.length > out.length) out = cloud;
-        } catch { /* ignore cloud fallback error */ }
+        } catch { /* ignore */ }
       }
 
       const cleaned = tidyText(out);
       setText(cleaned);
 
+      // local structure ก่อน
       const inv = parseInvoice(cleaned);
-      const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
-      const sp = smartParse(cleaned, { lang: langForSmart });
+      const sp  = smartParse(cleaned, { lang: ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto' });
 
-      const looksLikeInvoice =
+      const looksLikeInvoiceNow =
         inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
+      const looksLikeThaiMemoNow =
+        sp?.fields?.docType === 'thai_memo' || looksLikeThaiMemoClient(cleaned);
 
-      const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
-      const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
-      const finalSections = looksLikeInvoice ? buildInvoiceSections(inv, uiLang) : sp.sections;
+      let finalFields: SmartFields = sp.fields;
+      let finalLineItems: SmartLineItem[] = sp.lineItems ?? [];
+      let finalSections: { heading: string; content: string[] }[] = sp.sections ?? [];
+
+      if (looksLikeInvoiceNow) {
+        finalFields = { ...inv.fields, docType: 'invoice' as const };
+        finalLineItems = inv.lineItems;
+        finalSections = buildInvoiceSections(inv, uiLang);
+      } else if (looksLikeThaiMemoNow) {
+        const memo = parseThaiMemo(cleaned);
+        finalFields = { ...(sp.fields || {}), ...(memo.fields || {}), docType: 'thai_memo' as const };
+        finalSections = memo.sections || [];
+        finalLineItems = [];
+      }
 
       setSections(finalSections);
       setDocFields(finalFields);
@@ -441,8 +552,8 @@ export default function Page() {
       setToast({ type: 'success', message: t('toastDone') });
       setTimeout(() => setToast(null), 2200);
 
-      // Auto AI refine (ถ้าเปิด)
-      if (autoAI) aiRefineCall(cleaned, false);
+      // Auto AI refine — ถ้า endpoint ล่ม จะ fallback ใน catch
+      if (autoAI) aiRefineCall(cleaned);
     } catch (err: any) {
       setStatus({ stage: 'error', progress: 0, message: String(err?.message || err) });
       setToast({ type: 'error', message: `${t('error')}: ${String(err?.message || err)}` });
@@ -534,7 +645,7 @@ export default function Page() {
                 <canvas ref={canvasRef} style={{width: '100%'}} />
               </div>
               <div className="flex mt-4">
-                <button onClick={reset} className="btn btn-outline">{t('reset')}</button>
+                <button onClick={reset} className="btn btn-outline"> {t('reset')} </button>
                 <button onClick={runPipeline} className="btn btn-primary" disabled={!imageURL || !cvReady}>{t('reprocess')}</button>
               </div>
             </div>
@@ -551,12 +662,12 @@ export default function Page() {
                 <span className="small muted">{t('docLang')}</span>
                 <select value={ocrLang} onChange={(e) => setOcrLang(e.target.value as any)} className="select" style={{width:160}}>
                   <option value="auto">Auto</option>
-                  <option value="tha">ไทย (tha)</option>
-                  <option value="eng">English (eng)</option>
+                  <option value="tha">ไทย (Thai)</option>
+                  <option value="eng">English (Eng)</option>
                   <option value="tha+eng">ไทย+อังกฤษ</option>
                 </select>
 
-                {/* Auto AI toggle (สีเลือกได้: blue/green) */}
+                {/* Auto AI toggle */}
                 <label className="flex flex-center small muted" style={{ gap: 8 }}>
                   {t('autoAI')}
                   <span className="switch" data-on="blue" title="ปรับภาษา/จัดหัวข้ออัตโนมัติหลัง OCR">
@@ -566,12 +677,16 @@ export default function Page() {
                   </span>
                 </label>
 
-                {/* ปุ่ม ลอง AI (manual) — ซ่อนถ้าเปิด Auto */}
-                {!autoAI && (
-                  <button className="btn btn-primary" onClick={() => aiRefineCall(text, true)} disabled={!text} title="Refine with AI">
-                    <Wand2 size={16}/> {t('tryAI')}
-                  </button>
-                )}
+              {!autoAI && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => aiRefineCall(text)}   
+                  disabled={!text}
+                  title="Refine with AI"
+                >
+                  <Wand2 size={16}/> {t('tryAI')}
+                </button>
+              )}
               </div>
             </div>
 
@@ -600,23 +715,50 @@ export default function Page() {
                 <div className="alert mt-4">
                   <div className="stack">
                     <div className="title">{t('summary')}</div>
-                    {docFields.name   && <div className="small"><b>{t('name')}:</b> {docFields.name}</div>}
-                    {docFields.title  && <div className="small"><b>{t('title')}:</b> {docFields.title}</div>}
-                    {docFields.docType && <div className="small"><b>{t('docType')}:</b> {docFields.docType}</div>}
-                    {docFields.docNo  && <div className="small"><b>{t('docNo')}:</b> {docFields.docNo}</div>}
-                    {docFields.date   && <div className="small"><b>{t('date')}:</b> {docFields.date}</div>}
-                    {docFields.dueDate&& <div className="small"><b>{t('dueDate')}:</b> {docFields.dueDate}</div>}
-                    {(docFields.seller || docFields.buyer) && (
+
+                    {/* Thai memo fields */}
+                    {docFields.docType === 'thai_memo' && (
                       <>
-                        {docFields.seller && <div className="small"><b>{t('seller')}:</b> {docFields.seller}</div>}
-                        {docFields.buyer && <div className="small"><b>{t('buyer')}:</b> {docFields.buyer}</div>}
+                        {docFields.agency   && <div className="small"><b>{t('agency')}:</b> {docFields.agency}</div>}
+                        {docFields.refNo    && <div className="small"><b>{t('refNo')}:</b> {docFields.refNo}</div>}
+                        {docFields.date     && <div className="small"><b>{t('date')}:</b> {docFields.date}</div>}
+                        {docFields.title    && <div className="small"><b>{t('memoTitle')}:</b> {docFields.title}</div>}
+                        {docFields.to       && <div className="small"><b>{t('to')}:</b> {docFields.to}</div>}
+                        {docFields.signer   && <div className="small"><b>{t('signer')}:</b> {docFields.signer}</div>}
+                        {docFields.position && <div className="small"><b>{t('position')}:</b> {docFields.position}</div>}
                       </>
                     )}
-                    {(docFields.subtotal || docFields.vat || docFields.total) && (
+
+                    {/* Generic/Resume fields */}
+                    {docFields.docType !== 'thai_memo' && (
                       <>
-                        {docFields.subtotal?.text && <div className="small"><b>{t('subtotal')}:</b> {docFields.subtotal.text}</div>}
-                        {docFields.vat?.text      && <div className="small"><b>{t('vat')}:</b> {docFields.vat.text}</div>}
-                        {docFields.total?.text    && <div className="small"><b>{t('total')}:</b> {docFields.total.text}</div>}
+                        {docFields.name   && <div className="small"><b>{t('name')}:</b> {docFields.name}</div>}
+                        {docFields.title  && <div className="small"><b>{t('title')}:</b> {docFields.title}</div>}
+                      </>
+                    )}
+
+                    {/* Always show docType */}
+                    {docFields.docType && <div className="small"><b>{t('docType')}:</b> {docFields.docType}</div>}
+
+                    {/* Invoice-only fields */}
+                    {docFields.docType === 'invoice' && (
+                      <>
+                        {docFields.docNo  && <div className="small"><b>{t('docNo')}:</b> {docFields.docNo}</div>}
+                        {docFields.date   && <div className="small"><b>{t('date')}:</b> {docFields.date}</div>}
+                        {docFields.dueDate&& <div className="small"><b>{t('dueDate')}:</b> {docFields.dueDate}</div>}
+                        {(docFields.seller || docFields.buyer) && (
+                          <>
+                            {docFields.seller && <div className="small"><b>{t('seller')}:</b> {docFields.seller}</div>}
+                            {docFields.buyer && <div className="small"><b>{t('buyer')}:</b> {docFields.buyer}</div>}
+                          </>
+                        )}
+                        {(docFields.subtotal || docFields.vat || docFields.total) && (
+                          <>
+                            {docFields.subtotal?.text && <div className="small"><b>{t('subtotal')}:</b> {docFields.subtotal.text}</div>}
+                            {docFields.vat?.text      && <div className="small"><b>{t('vat')}:</b> {docFields.vat.text}</div>}
+                            {docFields.total?.text    && <div className="small"><b>{t('total')}:</b> {docFields.total.text}</div>}
+                          </>
+                        )}
                       </>
                     )}
                   </div>

@@ -1,103 +1,177 @@
-/** ===== Types ===== */
+// lib/headingParser.ts
+// Stronger heading extractor + Thai official memo parser (บันทึกข้อความ)
+// Backward-compatible: functions accept optional 2nd arg (_opts?: unknown).
+
 export interface ParsedSection {
   heading: string;
   content: string[];
 }
 
-/** ===== Helpers ===== */
-const isMostlyUpper = (s: string) => {
-  const letters = s.replace(/[^A-Za-z]/g, '');
-  if (letters.length < 4) return false;
-  const uppers = letters.replace(/[^A-Z]/g, '').length;
-  return uppers / letters.length >= 0.75;
-};
+const THAI_KEYS = [
+  'บันทึกข้อความ','ส่วนราชการ','ที่','วันที่','เรื่อง','เรียน','สิ่งที่ส่งมาด้วย',
+  'สรุป','วัตถุประสงค์','สถานที่','กำหนดการ','ผู้รับผิดชอบ','ลงชื่อ','ตำแหน่ง','หมายเหตุ'
+];
 
-const normalize = (s: string) =>
-  (s || '')
-    .normalize('NFC')
-    .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
+const RE_COLON_END = /[:：]$/;
+const RE_ALLCAPS_LATIN = /^[A-Z0-9 ().\/\-]{4,}$/;
+const RE_BULLET = /^[-•–—●▪︎■□] ?/;
+const RE_ENUM = /^((ข้อ|หัวข้อ)\s*\d+|[0-9]+[.)]|[๑-๙]+[.)]|\(\d+\)|\d+\.)\s*/;
+const RE_SOFT_SPLIT = /([A-Za-zก-ฮ0-9])[‐-]\s*$/;
 
-/** ตรวจว่าเป็นหัวข้อไหม (TH/EN) */
-const isHeadingLine = (line: string): boolean => {
+function norm(s: string): string {
+  return (s||'')
+    .replace(/\u00A0/g,' ')
+    .replace(/[ \t]+/g,' ')
+    .replace(/\s+$/,'')
+    .replace(/^\s+/,'')
+}
+
+function looksLikeHeading(line: string): boolean {
   const l = line.trim();
-
   if (!l) return false;
-
-  // รูปแบบทั่วไป: คำขึ้นต้น + ":" หรือ ลงท้าย ":" / "--"
-  if (/^.{2,40}[:：]\s*$/.test(l)) return true;
-
-  // All-caps (อังกฤษ) ยาวพอสมควร
-  if (isMostlyUpper(l)) return true;
-
-  // คีย์เวิร์ดหัวข้อไทย/อังกฤษยอดฮิต
-  if (
-    /^(เนื้อหา|หัวข้อ|สรุป|หมายเหตุ|รายละเอียด|ข้อมูล|ภาคผนวก|อ้างอิง)\b/.test(l) ||
-    /^(SUMMARY|ABSTRACT|INTRODUCTION|EDUCATION|EXPERIENCE|PROJECTS?|SKILLS|CERTIFICATIONS?|ADDITIONAL INFORMATION|INVOICE|RECEIPT|BILL TO|SHIP TO|ISSUED TO|PAY TO|TOTAL|SUBTOTAL)\b/i.test(
-      l
-    )
-  ) {
-    return true;
-  }
-
-  // “INVOICE NO ... DATE ...” แบบยาวในบรรทัดเดียว
-  if (/^(INVOICE|RECEIPT)\b.+(DATE|DUE DATE)\b/i.test(l)) return true;
-
+  if (RE_COLON_END.test(l)) return true;
+  if (l.length <= 20 && THAI_KEYS.some(k => l.startsWith(k))) return true;
+  if (RE_ALLCAPS_LATIN.test(l)) return true;
+  if (l.length <= 24 && !/[.!?…]$/.test(l)) return true;
   return false;
-};
+}
 
-/** บูลเล็ต/รายการ */
-const isBullet = (line: string): boolean =>
-  /^(\-|\*|•|▪|■|●|○)\s+/.test(line) || // • item
-  /^\(?\d{1,3}\)?[.)]\s+/.test(line) || // 1) / 1. / (1)
-  /^[A-Za-z][.)]\s+/.test(line); // A) / a)
+function shouldJoin(prev: string, cur: string): boolean {
+  if (!prev) return false;
+  const p = prev.trim(); const c = cur.trim();
+  if (!p || !c) return false;
+  if (/[,:;–—-]$/.test(p)) return true;
+  if (/^[a-zก-ฮ]/.test(c) && /[a-zก-ฮ0-9]$/.test(p)) return true;
+  if (RE_SOFT_SPLIT.test(p)) return true;
+  return false;
+}
 
-/** ===== Main parser ===== */
-export function parseHeadings(rawText: string): ParsedSection[] {
-  const text = normalize(rawText);
-  if (!text) return [];
+// 2nd argument kept for backward-compat; currently unused.
+export function parseHeadings(text: string, _opts?: unknown): ParsedSection[] {
+  const lines = (text||'').split(/\r?\n/).map(norm);
+  const out: ParsedSection[] = [];
+  let cur: ParsedSection | null = null;
 
-  const lines = text.split(/\r?\n/).map((l) => normalize(l));
-  const sections: ParsedSection[] = [];
-
-  let current: ParsedSection | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (!l) continue;
-
-    if (isHeadingLine(l)) {
-      // เปิดหัวข้อใหม่
-      current && sections.push(current);
-      current = { heading: l.replace(/\s*[:：]\s*$/, ''), content: [] };
-      continue;
-    }
-
-    // ถ้ายังไม่มีหัวข้อ ให้ยัดไปเป็น "เนื้อหา"
-    if (!current) {
-      current = { heading: 'เนื้อหา', content: [] };
-    }
-
-    // จัดการบูลเล็ต/ข้อความย่อย
-    if (isBullet(l)) {
-      current.content.push(l.replace(/^\(?\d{1,3}\)?[.)]\s+/, '').replace(/^(\-|\*|•|▪|■|●|○)\s+/, ''));
+  for (const raw of lines) {
+    if (!raw) continue;
+    const l = raw.replace(RE_BULLET,'').replace(RE_ENUM,'');
+    if (looksLikeHeading(l)) {
+      if (cur) out.push(cur);
+      cur = { heading: l.replace(RE_COLON_END,''), content: [] };
     } else {
-      // รวมบรรทัดให้เป็นย่อหน้า
-      const last = current.content[current.content.length - 1];
-      if (!last || /[.:;!?。！？]$/.test(last)) {
-        current.content.push(l);
+      if (!cur) cur = { heading: 'เนื้อหา', content: [] };
+      if (cur.content.length) {
+        const last = cur.content[cur.content.length-1];
+        if (shouldJoin(last, raw)) cur.content[cur.content.length-1] = (last + ' ' + raw).replace(/\s{2,}/g,' ');
+        else cur.content.push(raw);
       } else {
-        current.content[current.content.length - 1] = `${last} ${l}`;
+        cur.content.push(raw);
       }
     }
   }
+  if (cur) out.push(cur);
+  return out.map(s => ({ heading: s.heading.trim(), content: s.content.map(c => c.trim()).filter(Boolean)}))
+            .filter(s => s.heading || s.content.length);
+}
 
-  current && sections.push(current);
+// ---------- Thai official memo (บันทึกข้อความ) ----------
 
-  // เก็บกวาด: ตัดช่องว่าง, ตัด content ที่ซ้ำว่าง
-  return sections.map((s) => ({
-    heading: s.heading.trim(),
-    content: s.content.map((c) => c.trim()).filter(Boolean),
-  }));
+export interface ThaiMemoFields {
+  agency?: string;  // ส่วนราชการ
+  refNo?: string;   // ที่
+  date?: string;    // วันที่
+  title?: string;   // เรื่อง
+  to?: string;      // เรียน
+  signer?: string;  // ลงชื่อ
+  position?: string;// ตำแหน่ง
+}
+
+// 2nd argument kept for backward-compat; currently unused.
+export function detectThaiMemo(text: string, _opts?: unknown): boolean {
+  const t = (text||'');
+  const must = ['บันทึกข้อความ','ส่วนราชการ','เรื่อง'];
+  return must.every(k => t.includes(k));
+}
+
+// 2nd argument kept for backward-compat; currently unused.
+export function parseThaiMemo(text: string, _opts?: unknown): { sections: ParsedSection[], fields: ThaiMemoFields } {
+  const lines = (text||'').replace(/\r/g,'').split('\n').map(norm).filter(l=>l!=='');
+  const fields: ThaiMemoFields = {};
+  const sections: ParsedSection[] = [];
+
+  function grab(key: string): string | null {
+    const i = lines.findIndex(l => l.startsWith(key));
+    if (i === -1) return null;
+    return lines[i].replace(new RegExp('^' + key + '\\s*[:： ]?'), '').trim() || null;
+  }
+
+  fields.agency = grab('ส่วนราชการ') || undefined;
+  fields.refNo  = grab('ที่') || undefined;
+  fields.date   = grab('วันที่') || undefined;
+  fields.title  = grab('เรื่อง') || undefined;
+
+  // "เรียน" block
+  const learnIdx = lines.findIndex(l => l.startsWith('เรียน'));
+  if (learnIdx !== -1) {
+    const first = lines[learnIdx].replace(/^เรียน\s*[:： ]?/, '').trim();
+    const arr: string[] = first ? [first] : [];
+    for (let i=learnIdx+1;i<lines.length;i++) {
+      const ln = lines[i];
+      if (/^(สิ่งที่ส่งมาด้วย|ลงชื่อ|หมายเหตุ)\b/.test(ln)) break;
+      arr.push(ln);
+    }
+    sections.push({ heading: 'เรียน', content: arr.filter(Boolean) });
+    if (first) fields.to = first;
+  }
+
+  // Attachments
+  const attachIdx = lines.findIndex(l => l.startsWith('สิ่งที่ส่งมาด้วย'));
+  if (attachIdx !== -1) {
+    const list: string[] = [];
+    for (let i=attachIdx;i<lines.length;i++) {
+      const ln = lines[i];
+      if (i===attachIdx) {
+        const first = ln.replace(/^สิ่งที่ส่งมาด้วย\s*[:： ]?/, '').trim();
+        if (first) list.push(first);
+        continue;
+      }
+      if (/^(เรียน|ลงชื่อ|หมายเหตุ)\b/.test(ln)) break;
+      list.push(ln.replace(RE_BULLET,'').replace(RE_ENUM,''));
+    }
+    sections.push({ heading: 'สิ่งที่ส่งมาด้วย', content: list.filter(Boolean) });
+  }
+
+  // Body (between attachments/learn and signature)
+  const signIdx = lines.findIndex(l => l.startsWith('ลงชื่อ'));
+  const body: string[] = [];
+  const bodyStart = Math.max(learnIdx + 1, attachIdx !== -1 ? attachIdx + 1 : 0);
+  for (let i = bodyStart; (learnIdx !== -1) && i < (signIdx === -1 ? lines.length : signIdx); i++) {
+    const ln = lines[i];
+    if (/^(ส่วนราชการ|ที่|วันที่|เรื่อง|เรียน|สิ่งที่ส่งมาด้วย)\b/.test(ln)) continue;
+    body.push(ln);
+  }
+  if (body.length) sections.push({ heading: 'รายละเอียด', content: body });
+
+  // Signature block (avoid fragile regex literals)
+  if (signIdx !== -1) {
+    const sig = lines.slice(signIdx, Math.min(lines.length, signIdx + 6));
+    const sigText = sig.join(' ');
+    const nameRe = new RegExp('ลงชื่อ\s*([^\(\n]+?)(?:\s*\(|\s*ตำแหน่ง|$)');
+    const posRe  = new RegExp('ตำแหน่ง[:： ]?(.+?)$');
+    const mName = sigText.match(nameRe);
+    const mPos  = sigText.match(posRe);
+    if (mName) fields.signer = mName[1].trim();
+    if (mPos)  fields.position = mPos[1].trim();
+    sections.push({ heading: 'ลงชื่อ', content: sig.map(s => s.replace(/^ลงชื่อ[:： ]?/, '').trim()).filter(Boolean) });
+  }
+
+  // Header section (compact)
+  const head: string[] = [];
+  if (fields.agency) head.push(`ส่วนราชการ: ${fields.agency}`);
+  if (fields.refNo)  head.push(`ที่: ${fields.refNo}`);
+  if (fields.date)   head.push(`วันที่: ${fields.date}`);
+  if (fields.title)  head.push(`เรื่อง: ${fields.title}`);
+  if (head.length) sections.unshift({ heading: 'ส่วนหัวเอกสาร', content: head });
+
+  return { sections, fields };
 }
