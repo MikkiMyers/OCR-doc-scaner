@@ -1,9 +1,11 @@
 'use client';
 import './styles/app.minimal.pro.css';
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Spinner from '@/components/Spinner';
 import { Download, Image as ImageIcon, ScanLine, Wand2 } from 'lucide-react';
 import { createWorker, PSM } from 'tesseract.js';
+
+import Spinner from '@/components/Spinner';
 import { smartParse, SmartFields, LineItem as SmartLineItem } from '@/lib/smartParser';
 import { parseInvoice } from '@/lib/invoiceParser';
 
@@ -13,15 +15,60 @@ type OCRState = 'idle' | 'preprocess' | 'ocr' | 'done' | 'error';
 type OCRProgress = { stage: OCRState; progress: number; message?: string };
 
 const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || 'DocScan OCR';
-const AI_MODE = (process.env.NEXT_PUBLIC_AI_PROVIDER || 'local') as 'local'|'cloud';
+const PROVIDER = (process.env.NEXT_PUBLIC_AI_PROVIDER || 'local').toLowerCase(); // 'local' | 'cloud' | 'off'
+const DEFAULT_AUTO_AI = PROVIDER !== 'off';
 
-/* ---------- small utils ---------- */
+/* ---------------- utilities ---------------- */
 const dataURLBytes = (d: string) => {
   const i = d.indexOf(','); const b64 = i >= 0 ? d.slice(i + 1) : d;
   return Math.ceil((b64.length * 3) / 4);
 };
 const loadImageFromDataURL = (d: string) =>
   new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = d; });
+
+/* --- looksLikeInvoice + sectionizer (fallback เมื่อไม่กด AI) --- */
+const looksLikeInvoice = (text: string) => {
+  const t = text || '';
+  const must = /INVOICE\b/i.test(t);
+  const cols = /(DESCRIPTION).*(UNIT PRICE).*(QTY|QUANTITY).*(TOTAL|AMOUNT)/i.test(t);
+  const money = /\bSUBTOTAL\b|\bTOTAL\b|\bTAX\b|\bVAT\b/i.test(t);
+  const meta = /(INVOICE\s*(NO|#)|DUE\s*DATE|INVOICE\s*DATE|P\.?O\.?#?)/i.test(t);
+  return must && (cols || money || meta);
+};
+const sectionizeInvoice = (text: string) => {
+  const lines = (text || '').split(/\r?\n/).map(l => l.trim());
+  const out: { heading: string; content: string[] }[] = [];
+  const idx = (re: RegExp) => lines.findIndex(l => re.test(l));
+  const iIssued = idx(/\b(ISSUED TO|BILL TO)\b/i);
+  const iPay    = idx(/\b(PAY TO|SHIP TO)\b/i);
+  const iMeta   = idx(/\b(INVOICE\s*(NO|#)|INVOICE\s*DATE|DUE\s*DATE|P\.?O\.?#?)\b/i);
+  const iTable  = idx(/(DESCRIPTION).*(UNIT PRICE).*(QTY|QUANTITY).*(TOTAL|AMOUNT)/i);
+  const iSub    = idx(/\bSUBTOTAL\b/i);
+  const iTotal  = idx(/^\s*(TOTAL|Grand Total)\b/i);
+
+  const take = (from: number, until: number) =>
+    (from >= 0 ? lines.slice(from + 1, (until >= 0 ? until : lines.length)).filter(Boolean) : []);
+
+  if (iMeta >= 0) out.push({ heading: 'Invoice Meta', content: [lines[iMeta]] });
+  if (iIssued >= 0) {
+    const until = Math.min(...[iPay, iTable, iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
+    out.push({ heading: lines[iIssued], content: take(iIssued, until) });
+  }
+  if (iPay >= 0) {
+    const until = Math.min(...[iTable, iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
+    out.push({ heading: lines[iPay], content: take(iPay, until) });
+  }
+  if (iTable >= 0) {
+    const until = Math.min(...[iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
+    out.push({ heading: 'Line Items', content: [lines[iTable], ...lines.slice(iTable + 1, until).filter(Boolean)] });
+  }
+  if (iSub >= 0 || iTotal >= 0) {
+    const start = (iSub >= 0 ? iSub : iTotal);
+    out.push({ heading: 'Totals', content: lines.slice(start).filter(l => /\b(SUBTOTAL|TOTAL|TAX|VAT)\b/i.test(l)) });
+  }
+  if (!out.length) out.push({ heading: 'Invoice', content: lines.filter(Boolean) });
+  return out;
+};
 
 export default function Page() {
   const [imageURL, setImageURL] = useState<string | null>(null);
@@ -33,6 +80,7 @@ export default function Page() {
   const [toast, setToast] = useState<{ type: 'success'|'error'|'info', message: string }|null>(null);
 
   const [ocrLang, setOcrLang] = useState<'auto' | 'tha' | 'eng' | 'tha+eng'>('auto');
+  const [autoAI, setAutoAI] = useState<boolean>(DEFAULT_AUTO_AI);
 
   const [sections, setSections] = useState<{ heading: string; content: string[] }[]>([]);
   const [docFields, setDocFields] = useState<SmartFields | null>(null);
@@ -40,6 +88,9 @@ export default function Page() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // เพื่อกัน refine ซ้ำ ๆ บนข้อความเดียว
+  const lastRefinedSigRef = useRef<string>('');
 
   /* ---------- OpenCV init ---------- */
   useEffect(() => {
@@ -74,7 +125,7 @@ export default function Page() {
     return workersRef.current[lang];
   }, []);
 
-  /* ---------- drag/drop ---------- */
+  /* ---------- Drag/Drop ---------- */
   const reset = () => {
     setImageURL(null); setProcessedURL(null); setText('');
     setSections([]); setDocFields(null); setLineItems([]);
@@ -89,7 +140,7 @@ export default function Page() {
     drop: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); },
   };
 
-  /* ---------- helpers ---------- */
+  /* ---------- Helpers ---------- */
   const urlToDataURL = useCallback(async (url: string): Promise<string> => {
     const res = await fetch(url);
     const blob = await res.blob();
@@ -105,7 +156,7 @@ export default function Page() {
     const merged: string[] = [];
     for (const l of lines) {
       const isBullet = /^[-•▪■●○]|^\d+\)|^\(?\d+\)|^[A-Za-z]\)/.test(l);
-      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประสบการณ์การทำงาน|ประวัติการศึกษา|ทักษะ|ทักษะทางภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|RESUME)\b/i.test(l);
+      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประสบการณ์การทำงาน|ประวัติการศึกษา|ทักษะ|ภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|INVOICE|RECEIPT|BILL)\b/i.test(l);
       if (!l) { merged.push(''); continue; }
       if (isBullet || isHeading) { merged.push(l); continue; }
       if (!merged.length || merged[merged.length - 1] === '') merged.push(l);
@@ -118,7 +169,7 @@ export default function Page() {
     return s.trim();
   }, []);
 
-  const compressDataURL = useCallback(async (d: string, maxBytes = 1_300_000) => {
+  const compressDataURL = useCallback(async (d: string, maxBytes = 950_000) => {
     if (dataURLBytes(d) <= maxBytes) return d;
     const img = await loadImageFromDataURL(d);
     const canvas = document.createElement('canvas');
@@ -137,10 +188,10 @@ export default function Page() {
   const toOcrSpaceLang = (l: 'auto' | 'tha' | 'eng' | 'tha+eng') => (l === 'auto' ? 'tha,eng' : l.replace('+', ','));
   const cloudOCR = useCallback(async (processedDataURL: string) => {
     setStatus({ stage: 'ocr', progress: 0.01, message: 'กำลังส่งให้โมเดล AI...' });
-    let payload = await compressDataURL(processedDataURL);
+    let payload = await compressDataURL(processedDataURL, 950_000);
     if (dataURLBytes(payload) < 20_000 && imageURL) {
       const raw = await urlToDataURL(imageURL);
-      payload = await compressDataURL(raw);
+      payload = await compressDataURL(raw, 950_000);
     }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25_000);
@@ -151,17 +202,48 @@ export default function Page() {
         body: JSON.stringify({ dataURL: payload, language: toOcrSpaceLang(ocrLang) }),
         signal: controller.signal,
       });
-      // เช็ค res.ok เพื่อกัน JSON ว่าง/500
-      if (!res.ok) {
-        const txt = await res.text().catch(()=>'');
-        throw new Error(`OCR API ${res.status}: ${txt || 'failed'}`);
-      }
-      const json = await res.json();
+      const raw = await res.text();
+      if (!res.ok) throw new Error(raw || `OCR API ${res.status}`);
+      let json: any; try { json = JSON.parse(raw); } catch { throw new Error(raw); }
       return json.text as string;
     } finally { clearTimeout(timeoutId); }
   }, [compressDataURL, imageURL, urlToDataURL, ocrLang]);
 
-  /* ---------- Pipeline ---------- */
+  /* ---------- AI refine (ปรับภาษา/จัดหัวข้อ) ---------- */
+  const aiRefineCall = useCallback(async (srcText: string, showToast = true) => {
+    if (!srcText?.trim()) return false;
+    try {
+      const sig = srcText.slice(0, 200) + '|' + srcText.length;
+      if (lastRefinedSigRef.current === sig) return true;
+
+      setStatus({ stage: 'ocr', progress: 0.02, message: 'กำลังปรับปรุงข้อความ…' });
+      const res = await fetch('/api/ai-refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: srcText }),
+      });
+      const raw = await res.text();
+      if (!res.ok) throw new Error(raw || `AI refine error: ${res.status}`);
+      let json: any; try { json = JSON.parse(raw); } catch { throw new Error(raw || 'bad JSON'); }
+      if (!json.ok) throw new Error(json.error || 'AI refine failed');
+
+      setText(json.cleanText ?? srcText);
+      if (Array.isArray(json.sections)) setSections(json.sections);
+      if (json.fields) setDocFields(prev => ({ ...(prev || { docType: 'generic' }), ...json.fields }));
+      if (Array.isArray(json.lineItems)) setLineItems(json.lineItems);
+
+      setStatus({ stage: 'done', progress: 1 });
+      if (showToast) { setToast({ type: 'success', message: `ปรับภาษา/จัดหัวข้อสำเร็จ (${json.from || 'local'})` }); setTimeout(() => setToast(null), 2000); }
+      lastRefinedSigRef.current = sig;
+      return true;
+    } catch (e: any) {
+      if (showToast) { setToast({ type: 'error', message: `AI refine ล้มเหลว: ${String(e?.message || e)}` }); setTimeout(() => setToast(null), 3200); }
+      setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
+      return false;
+    }
+  }, []);
+
+  /* ---------- OCR Pipeline ---------- */
   const runPipeline = useCallback(async () => {
     if (!imageURL || !cvReady) return;
     try {
@@ -261,77 +343,40 @@ export default function Page() {
       const cleaned = tidyText(out);
       setText(cleaned);
 
+      // ----- Non-AI structuring (ดีขึ้นกว่าเดิม)
       const inv = parseInvoice(cleaned);
       const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
       const sp = smartParse(cleaned, { lang: langForSmart });
 
-      const looksLikeInvoice =
-        inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
-      const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
-      const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
-
-      setSections(sp.sections);
+      const isInvoice = looksLikeInvoice(cleaned) || inv.lineItems.length > 0 || !!inv.fields.total?.value || /INVOICE|RECEIPT/i.test(cleaned);
+      const finalFields: SmartFields = isInvoice ? inv.fields : sp.fields;
+      const finalLineItems: SmartLineItem[] = isInvoice ? inv.lineItems : (sp.lineItems ?? []);
       setDocFields(finalFields);
       setLineItems(finalLineItems);
+      setSections(isInvoice ? sectionizeInvoice(cleaned) : (sp.sections ?? []));
 
       setStatus({ stage: 'done', progress: 1 });
       setToast({ type: 'success', message: 'ประมวลผลเสร็จแล้ว' });
-      setTimeout(() => setToast(null), 2500);
+      setTimeout(() => setToast(null), 2200);
+
+      // ----- Auto AI refine (ถ้าเปิด)
+      if (autoAI) { await aiRefineCall(cleaned, false); }
     } catch (err: any) {
       console.error(err);
       setStatus({ stage: 'error', progress: 0, message: (err as Error).message });
       setToast({ type: 'error', message: `ผิดพลาด: ${String(err?.message || err)}` });
-      setTimeout(() => setToast(null), 3000);
+      setTimeout(() => setToast(null), 3200);
     }
-  }, [imageURL, cvReady, ocrLang, getWorker, cloudOCR, urlToDataURL, tidyText]);
+  }, [imageURL, cvReady, ocrLang, getWorker, cloudOCR, urlToDataURL, tidyText, autoAI, aiRefineCall]);
 
   useEffect(() => { if (imageURL && cvReady) runPipeline(); }, [imageURL, cvReady, runPipeline]);
 
-  /* ---------- download JSON ---------- */
+  /* ---------- Download JSON ---------- */
   const downloadJSON = () => {
     const blob = new Blob([JSON.stringify({ text, fields: docFields, lineItems, sections }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = 'ocr_result.json'; a.click(); URL.revokeObjectURL(url);
   };
-
-  /* ---------- call AI refine API ---------- */
-  const callAiRefine = useCallback(async () => {
-    if (!text?.trim()) return;
-    try {
-      setStatus({ stage: 'ocr', progress: 0.01, message: 'กำลังปรับปรุงข้อความ…' });
-      const res = await fetch('/api/ai-refine', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!res.ok) {
-        const t = await res.text().catch(()=> '');
-        throw new Error(t || `AI refine error: ${res.status}`);
-      }
-
-      // ป้องกัน Unexpected end of JSON input
-      const raw = await res.text();
-      const json = raw ? JSON.parse(raw) : { ok: false, error: 'empty' };
-
-      if (!json.ok) throw new Error(json.error || 'AI refine failed');
-
-      setText(json.cleanText ?? text);
-      if (Array.isArray(json.sections)) setSections(json.sections);
-      if (json.fields) {
-        setDocFields((prev) => ({ ...(prev || { docType: 'generic' }), ...json.fields }));
-      }
-
-      setStatus({ stage: 'done', progress: 1 });
-      setToast({ type: 'success', message: `ปรับปรุงแล้ว (${json.from || AI_MODE})` });
-      setTimeout(() => setToast(null), 2400);
-    } catch (e: any) {
-      console.error(e);
-      setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
-      setToast({ type: 'error', message: `AI refine ล้มเหลว: ${String(e?.message || e)}` });
-      setTimeout(() => setToast(null), 3200);
-    }
-  }, [text]);
 
   return (
     <main className="container">
@@ -341,6 +386,7 @@ export default function Page() {
           <div className="logo">{APP_NAME}</div>
           <div className="small muted">ไทย/อังกฤษ · OpenCV + Tesseract · Smart Parser</div>
           <div className="grow" />
+          <div className="small muted" title={`AI provider: ${PROVIDER}`}>AI: <b>{PROVIDER}</b></div>
           <button className="btn btn-outline btn-sm" onClick={downloadJSON} disabled={!text}>
             <Download size={16}/> ดาวน์โหลด JSON
           </button>
@@ -396,8 +442,7 @@ export default function Page() {
                 <button onClick={reset} className="btn btn-outline">ล้างค่า</button>
                 <button onClick={runPipeline} className="btn btn-primary" disabled={!imageURL || !cvReady}>ประมวลผลอีกครั้ง</button>
               </div>
-
-              {/* Status pill */}
+              {/* Status */}
               <div className={`status mt-3 status--${status.stage}`}>
                 <span className="dot" />
                 <span className="label">
@@ -432,56 +477,31 @@ export default function Page() {
                   <option value="tha+eng">ไทย+อังกฤษ</option>
                 </select>
 
-                {/* ปุ่ม AI OCR (คลาวด์) */}
-                <button
-                  onClick={async () => {
-                    if (!processedURL) return;
-                    try {
-                      const t = await cloudOCR(processedURL);
-                      const cleaned = tidyText(t);
-                      setText(cleaned);
+                {/* Auto AI toggle */}
+                <label className="flex flex-center small muted" style={{gap:8}}>
+                  Auto AI
+                  <span className="switch">
+                    <input type="checkbox" checked={autoAI} onChange={(e) => setAutoAI(e.target.checked)} />
+                    <span className="dot" /><span className="track" />
+                  </span>
+                </label>
 
-                      const inv = parseInvoice(cleaned);
-                      const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
-                      const sp = smartParse(cleaned, { lang: langForSmart });
-
-                      const looksLikeInvoice = inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
-                      const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
-                      const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
-
-                      setSections(sp.sections); setDocFields(finalFields); setLineItems(finalLineItems);
-                      setStatus({ stage: 'done', progress: 1 });
-                      setToast({ type: 'success', message: 'AI OCR (คลาวด์) สำเร็จ' });
-                      setTimeout(() => setToast(null), 2200);
-                    } catch (e: any) {
-                      setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
-                      setToast({ type: 'error', message: `Cloud OCR error: ${String(e?.message || e)}` });
-                      setTimeout(() => setToast(null), 3200);
-                    }
-                  }}
-                  className="btn btn-outline"
-                  disabled={!processedURL}
-                  title="ใช้ OCR.space (ฟรีถ้าใช้คีย์ helloworld)"
-                >
-                  AI OCR (คลาวด์)
-                </button>
-
-                {/* ปุ่ม ลอง AI (refine) */}
-                <button className="btn btn-primary" onClick={callAiRefine} disabled={!text}>
-                  <Wand2 size={16}/> ลอง AI{AI_MODE === 'local' ? ' (ออฟไลน์)' : ''}
+                {/* ปุ่ม ลอง AI */}
+                <button className="btn btn-primary" onClick={() => aiRefineCall(text, true)} disabled={!text} title="ปรับภาษา/จัดหัวข้อจากผล OCR">
+                  <Wand2 size={16}/> ลอง AI
                 </button>
               </div>
             </div>
 
             <div className="card-body">
               {/* Smart summary */}
-              {docFields && docFields.docType !== 'generic' && (
+              {docFields && (
                 <div className="alert">
                   <div className="stack">
-                    <div className="title">สรุปเอกสาร (Smart Parser)</div>
+                    <div className="title">สรุปเอกสาร (Smart Parser / AI)</div>
                     {docFields.name && <div className="small"><b>ชื่อ:</b> {docFields.name}</div>}
                     {docFields.title && <div className="small"><b>ตำแหน่ง:</b> {docFields.title}</div>}
-                    <div className="small"><b>ชนิดเอกสาร:</b> {docFields.docType}</div>
+                    {docFields.docType && <div className="small"><b>ชนิดเอกสาร:</b> {docFields.docType}</div>}
                     {docFields.docNo && <div className="small"><b>เลขที่:</b> {docFields.docNo}</div>}
                     {docFields.date && <div className="small"><b>วันที่:</b> {docFields.date}</div>}
                     {docFields.dueDate && <div className="small"><b>กำหนดชำระ:</b> {docFields.dueDate}</div>}
@@ -494,7 +514,7 @@ export default function Page() {
                     {(docFields.subtotal || docFields.vat || docFields.total) && (
                       <>
                         {docFields.subtotal?.text && <div className="small"><b>Subtotal:</b> {docFields.subtotal.text}</div>}
-                        {docFields.vat?.text && <div className="small"><b>VAT:</b> {docFields.vat.text}</div>}
+                        {docFields.vat?.text && <div className="small"><b>VAT/Tax:</b> {docFields.vat.text}</div>}
                         {docFields.total?.text && <div className="small"><b>Total:</b> {docFields.total.text}</div>}
                       </>
                     )}
