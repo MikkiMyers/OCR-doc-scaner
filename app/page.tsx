@@ -1,11 +1,8 @@
 'use client';
 import './styles/app.minimal.pro.css';
-
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Download, Image as ImageIcon, ScanLine, Wand2 } from 'lucide-react';
 import { createWorker, PSM } from 'tesseract.js';
-
-import Spinner from '@/components/Spinner';
 import { smartParse, SmartFields, LineItem as SmartLineItem } from '@/lib/smartParser';
 import { parseInvoice } from '@/lib/invoiceParser';
 
@@ -15,10 +12,108 @@ type OCRState = 'idle' | 'preprocess' | 'ocr' | 'done' | 'error';
 type OCRProgress = { stage: OCRState; progress: number; message?: string };
 
 const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || 'DocScan OCR';
-const PROVIDER = (process.env.NEXT_PUBLIC_AI_PROVIDER || 'local').toLowerCase(); // 'local' | 'cloud' | 'off'
-const DEFAULT_AUTO_AI = PROVIDER !== 'off';
 
-/* ---------------- utilities ---------------- */
+/* -------------------- i18n (TH/EN) -------------------- */
+type Lang = 'th' | 'en';
+const DICT: Record<Lang, Record<string, string>> = {
+  th: {
+    appTag: 'ไทย/อังกฤษ · OpenCV + Tesseract · Smart Parser',
+    uploadBadge: 'อัปโหลดเอกสาร',
+    dragHere: 'ลากไฟล์มาวางที่นี่ หรือ',
+    chooseFile: 'เลือกไฟล์',
+    formats: 'รองรับ .jpg / .png ขนาดไม่เกิน ~10MB',
+    originalImage: 'ภาพต้นฉบับ',
+    processedImage: 'ภาพหลังปรับ (สำหรับ OCR)',
+    reset: 'ล้างค่า',
+    reprocess: 'ประมวลผลอีกครั้ง',
+    status: 'สถานะ',
+    waiting: 'รออัปโหลด',
+    preparing: 'กำลังเตรียมภาพ',
+    reading: 'กำลังอ่านตัวอักษร…',
+    done: 'เสร็จสมบูรณ์',
+    error: 'ผิดพลาด',
+    docLang: 'ภาษาเอกสาร',
+    resultsTitle: 'ผลลัพธ์ OCR',
+    autoAI: 'Auto AI',
+    tryAI: 'ลอง AI',
+    summary: 'สรุปเอกสาร (Smart Parser / AI)',
+    docType: 'ชนิดเอกสาร',
+    docNo: 'เลขที่',
+    date: 'วันที่',
+    dueDate: 'กำหนดชำระ',
+    seller: 'ผู้ขาย/ผู้ให้บริการ',
+    buyer: 'ผู้ซื้อ/ลูกค้า',
+    subtotal: 'Subtotal',
+    vat: 'VAT',
+    total: 'Total',
+    name: 'ชื่อ',
+    title: 'ตำแหน่ง',
+    rawText: 'ข้อความดิบ',
+    sections: 'แยกเป็นหัวข้อ (heuristic/AI)',
+    downloadJSON: 'ดาวน์โหลด JSON',
+    toastDone: 'ประมวลผลเสร็จแล้ว',
+    toastRefined: 'ปรับภาษา/จัดหัวข้อสำเร็จ',
+    toastRefineFailed: 'AI refine ล้มเหลว',
+    // Invoice specific
+    invoiceMeta: 'ข้อมูลใบแจ้งหนี้',
+    lineItems: 'รายการ',
+    totals: 'สรุปยอด',
+  },
+  en: {
+    appTag: 'Thai/English · OpenCV + Tesseract · Smart Parser',
+    uploadBadge: 'Upload document',
+    dragHere: 'Drag & drop here or',
+    chooseFile: 'Choose file',
+    formats: 'Supports .jpg / .png ~10MB',
+    originalImage: 'Original image',
+    processedImage: 'Processed (for OCR)',
+    reset: 'Reset',
+    reprocess: 'Re-run',
+    status: 'Status',
+    waiting: 'Waiting',
+    preparing: 'Preprocessing',
+    reading: 'Recognizing…',
+    done: 'Completed',
+    error: 'Error',
+    docLang: 'Document language',
+    resultsTitle: 'OCR Results',
+    autoAI: 'Auto AI',
+    tryAI: 'Try AI',
+    summary: 'Document summary (Smart Parser / AI)',
+    docType: 'Document type',
+    docNo: 'No.',
+    date: 'Date',
+    dueDate: 'Due date',
+    seller: 'Seller/Provider',
+    buyer: 'Buyer/Client',
+    subtotal: 'Subtotal',
+    vat: 'VAT',
+    total: 'Total',
+    name: 'Name',
+    title: 'Title',
+    rawText: 'Raw text',
+    sections: 'Structured sections (heuristic/AI)',
+    downloadJSON: 'Download JSON',
+    toastDone: 'Processing finished',
+    toastRefined: 'Language/Sections refined',
+    toastRefineFailed: 'AI refine failed',
+    invoiceMeta: 'Invoice meta',
+    lineItems: 'Line items',
+    totals: 'Totals',
+  }
+};
+const useI18n = () => {
+  const [uiLang, setUiLang] = useState<Lang>('th');
+  const t = useCallback((k: string) => DICT[uiLang]?.[k] ?? k, [uiLang]);
+  useEffect(() => {
+    const saved = (typeof window !== 'undefined' && localStorage.getItem('uiLang')) as Lang | null;
+    if (saved === 'th' || saved === 'en') setUiLang(saved);
+  }, []);
+  useEffect(() => { if (typeof window !== 'undefined') localStorage.setItem('uiLang', uiLang); }, [uiLang]);
+  return { uiLang, setUiLang, t };
+};
+
+/* -------------------- utils -------------------- */
 const dataURLBytes = (d: string) => {
   const i = d.indexOf(','); const b64 = i >= 0 ? d.slice(i + 1) : d;
   return Math.ceil((b64.length * 3) / 4);
@@ -26,51 +121,16 @@ const dataURLBytes = (d: string) => {
 const loadImageFromDataURL = (d: string) =>
   new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = d; });
 
-/* --- looksLikeInvoice + sectionizer (fallback เมื่อไม่กด AI) --- */
-const looksLikeInvoice = (text: string) => {
-  const t = text || '';
-  const must = /INVOICE\b/i.test(t);
-  const cols = /(DESCRIPTION).*(UNIT PRICE).*(QTY|QUANTITY).*(TOTAL|AMOUNT)/i.test(t);
-  const money = /\bSUBTOTAL\b|\bTOTAL\b|\bTAX\b|\bVAT\b/i.test(t);
-  const meta = /(INVOICE\s*(NO|#)|DUE\s*DATE|INVOICE\s*DATE|P\.?O\.?#?)/i.test(t);
-  return must && (cols || money || meta);
-};
-const sectionizeInvoice = (text: string) => {
-  const lines = (text || '').split(/\r?\n/).map(l => l.trim());
-  const out: { heading: string; content: string[] }[] = [];
-  const idx = (re: RegExp) => lines.findIndex(l => re.test(l));
-  const iIssued = idx(/\b(ISSUED TO|BILL TO)\b/i);
-  const iPay    = idx(/\b(PAY TO|SHIP TO)\b/i);
-  const iMeta   = idx(/\b(INVOICE\s*(NO|#)|INVOICE\s*DATE|DUE\s*DATE|P\.?O\.?#?)\b/i);
-  const iTable  = idx(/(DESCRIPTION).*(UNIT PRICE).*(QTY|QUANTITY).*(TOTAL|AMOUNT)/i);
-  const iSub    = idx(/\bSUBTOTAL\b/i);
-  const iTotal  = idx(/^\s*(TOTAL|Grand Total)\b/i);
-
-  const take = (from: number, until: number) =>
-    (from >= 0 ? lines.slice(from + 1, (until >= 0 ? until : lines.length)).filter(Boolean) : []);
-
-  if (iMeta >= 0) out.push({ heading: 'Invoice Meta', content: [lines[iMeta]] });
-  if (iIssued >= 0) {
-    const until = Math.min(...[iPay, iTable, iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
-    out.push({ heading: lines[iIssued], content: take(iIssued, until) });
-  }
-  if (iPay >= 0) {
-    const until = Math.min(...[iTable, iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
-    out.push({ heading: lines[iPay], content: take(iPay, until) });
-  }
-  if (iTable >= 0) {
-    const until = Math.min(...[iSub, iTotal].map(x => (x >= 0 ? x : 1e9)));
-    out.push({ heading: 'Line Items', content: [lines[iTable], ...lines.slice(iTable + 1, until).filter(Boolean)] });
-  }
-  if (iSub >= 0 || iTotal >= 0) {
-    const start = (iSub >= 0 ? iSub : iTotal);
-    out.push({ heading: 'Totals', content: lines.slice(start).filter(l => /\b(SUBTOTAL|TOTAL|TAX|VAT)\b/i.test(l)) });
-  }
-  if (!out.length) out.push({ heading: 'Invoice', content: lines.filter(Boolean) });
-  return out;
+/* number format for money-ish */
+const fmtNum = (n: any) => {
+  const v = typeof n === 'number' ? n : parseFloat(String(n).replace(/[^0-9.-]/g, ''));
+  if (isNaN(v)) return String(n ?? '');
+  return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
 export default function Page() {
+  const { uiLang, setUiLang, t } = useI18n();
+
   const [imageURL, setImageURL] = useState<string | null>(null);
   const [processedURL, setProcessedURL] = useState<string | null>(null);
   const [text, setText] = useState<string>('');
@@ -78,19 +138,18 @@ export default function Page() {
   const [cvReady, setCvReady] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [toast, setToast] = useState<{ type: 'success'|'error'|'info', message: string }|null>(null);
+  const [autoAI, setAutoAI] = useState<boolean>(true);
 
+  // doc OCR language (engine)
   const [ocrLang, setOcrLang] = useState<'auto' | 'tha' | 'eng' | 'tha+eng'>('auto');
-  const [autoAI, setAutoAI] = useState<boolean>(DEFAULT_AUTO_AI);
 
+  // parsed outputs
   const [sections, setSections] = useState<{ heading: string; content: string[] }[]>([]);
   const [docFields, setDocFields] = useState<SmartFields | null>(null);
   const [lineItems, setLineItems] = useState<SmartLineItem[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  // เพื่อกัน refine ซ้ำ ๆ บนข้อความเดียว
-  const lastRefinedSigRef = useRef<string>('');
 
   /* ---------- OpenCV init ---------- */
   useEffect(() => {
@@ -108,7 +167,7 @@ export default function Page() {
   }, []);
 
   /* ---------- Tesseract workers ---------- */
-  const workersRef = useRef<Record<string, Promise<any>>>({});
+  const workersRef = useRef<Record<string, Promise<any>>>({ });
   const getWorker = useCallback((lang: 'tha' | 'eng' | 'tha+eng') => {
     if (!workersRef.current[lang]) {
       workersRef.current[lang] = createWorker(
@@ -140,7 +199,7 @@ export default function Page() {
     drop: (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); },
   };
 
-  /* ---------- Helpers ---------- */
+  /* ---------- helpers ---------- */
   const urlToDataURL = useCallback(async (url: string): Promise<string> => {
     const res = await fetch(url);
     const blob = await res.blob();
@@ -156,7 +215,7 @@ export default function Page() {
     const merged: string[] = [];
     for (const l of lines) {
       const isBullet = /^[-•▪■●○]|^\d+\)|^\(?\d+\)|^[A-Za-z]\)/.test(l);
-      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประสบการณ์การทำงาน|ประวัติการศึกษา|ทักษะ|ภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|INVOICE|RECEIPT|BILL)\b/i.test(l);
+      const isHeading = /^(เกี่ยวกับฉัน|ติดต่อ|ประสบการณ์|ประวัติการศึกษา|ทักษะ|ภาษา|รางวัล|SUMMARY|EXPERIENCE|EDUCATION|SKILLS|AWARDS|CONTACT|PROFILE|RESUME|INVOICE|RECEIPT|BILL|ISSUED TO|PAY TO|TOTAL|SUBTOTAL)\b/i.test(l);
       if (!l) { merged.push(''); continue; }
       if (isBullet || isHeading) { merged.push(l); continue; }
       if (!merged.length || merged[merged.length - 1] === '') merged.push(l);
@@ -187,7 +246,7 @@ export default function Page() {
   /* ---------- Cloud OCR (OCR.space) ---------- */
   const toOcrSpaceLang = (l: 'auto' | 'tha' | 'eng' | 'tha+eng') => (l === 'auto' ? 'tha,eng' : l.replace('+', ','));
   const cloudOCR = useCallback(async (processedDataURL: string) => {
-    setStatus({ stage: 'ocr', progress: 0.01, message: 'กำลังส่งให้โมเดล AI...' });
+    setStatus({ stage: 'ocr', progress: 0.01, message: t('reading') });
     let payload = await compressDataURL(processedDataURL, 950_000);
     if (dataURLBytes(payload) < 20_000 && imageURL) {
       const raw = await urlToDataURL(imageURL);
@@ -207,50 +266,70 @@ export default function Page() {
       let json: any; try { json = JSON.parse(raw); } catch { throw new Error(raw); }
       return json.text as string;
     } finally { clearTimeout(timeoutId); }
-  }, [compressDataURL, imageURL, urlToDataURL, ocrLang]);
+  }, [compressDataURL, imageURL, urlToDataURL, ocrLang, t]);
 
-  /* ---------- AI refine (ปรับภาษา/จัดหัวข้อ) ---------- */
-  const aiRefineCall = useCallback(async (srcText: string, showToast = true) => {
-    if (!srcText?.trim()) return false;
+  /* ---------- AI refine (auto/manual) ---------- */
+  const aiRefineCall = useCallback(async (inputText: string, manual = false) => {
+    if (!inputText?.trim()) return;
     try {
-      const sig = srcText.slice(0, 200) + '|' + srcText.length;
-      if (lastRefinedSigRef.current === sig) return true;
-
-      setStatus({ stage: 'ocr', progress: 0.02, message: 'กำลังปรับปรุงข้อความ…' });
+      setStatus({ stage: 'ocr', progress: 0.01, message: t('reading') });
       const res = await fetch('/api/ai-refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: srcText }),
+        body: JSON.stringify({ text: inputText }),
       });
       const raw = await res.text();
       if (!res.ok) throw new Error(raw || `AI refine error: ${res.status}`);
       let json: any; try { json = JSON.parse(raw); } catch { throw new Error(raw || 'bad JSON'); }
       if (!json.ok) throw new Error(json.error || 'AI refine failed');
 
-      setText(json.cleanText ?? srcText);
+      setText(json.cleanText ?? inputText);
       if (Array.isArray(json.sections)) setSections(json.sections);
       if (json.fields) setDocFields(prev => ({ ...(prev || { docType: 'generic' }), ...json.fields }));
-      if (Array.isArray(json.lineItems)) setLineItems(json.lineItems);
-
       setStatus({ stage: 'done', progress: 1 });
-      if (showToast) { setToast({ type: 'success', message: `ปรับภาษา/จัดหัวข้อสำเร็จ (${json.from || 'local'})` }); setTimeout(() => setToast(null), 2000); }
-      lastRefinedSigRef.current = sig;
-      return true;
+      setToast({ type: 'success', message: `${t('toastRefined')} (${json.from || 'local'})` });
+      setTimeout(() => setToast(null), 2000);
     } catch (e: any) {
-      if (showToast) { setToast({ type: 'error', message: `AI refine ล้มเหลว: ${String(e?.message || e)}` }); setTimeout(() => setToast(null), 3200); }
       setStatus({ stage: 'error', progress: 0, message: String(e?.message || e) });
-      return false;
+      setToast({ type: 'error', message: `${t('toastRefineFailed')}: ${String(e?.message || e)}` });
+      setTimeout(() => setToast(null), 3400);
     }
+  }, [t]);
+
+  /* ---------- Build sections for Invoice (better headings even without AI) ---------- */
+  const buildInvoiceSections = useCallback((inv: ReturnType<typeof parseInvoice>, lang: Lang) => {
+    const L = DICT[lang];
+    const s: { heading: string; content: string[] }[] = [];
+    const meta: string[] = [];
+    if (inv.fields.docNo) meta.push(`${L.docNo}: ${inv.fields.docNo}`);
+    if (inv.fields.date)  meta.push(`${L.date}: ${inv.fields.date}`);
+    if (inv.fields.dueDate) meta.push(`${L.dueDate}: ${inv.fields.dueDate}`);
+    if (meta.length) s.push({ heading: L.invoiceMeta, content: meta });
+
+    if (inv.lineItems?.length) {
+      const items = inv.lineItems.map(li =>
+        `${li.description || ''} · ${L.subtotal}: ${fmtNum(li.amount ?? li.unitPrice ?? '')}`
+      );
+      s.push({ heading: L.lineItems, content: items });
+    }
+
+    const totals: string[] = [];
+    if (inv.fields.subtotal?.text) totals.push(`${L.subtotal}: ${inv.fields.subtotal.text}`);
+    if (inv.fields.vat?.text)      totals.push(`${L.vat}: ${inv.fields.vat.text}`);
+    if (inv.fields.total?.text)    totals.push(`${L.total}: ${inv.fields.total.text}`);
+    if (totals.length) s.push({ heading: L.totals, content: totals });
+
+    return s;
   }, []);
 
   /* ---------- OCR Pipeline ---------- */
   const runPipeline = useCallback(async () => {
     if (!imageURL || !cvReady) return;
     try {
-      setStatus({ stage: 'preprocess', progress: 0.05, message: 'กำลังเตรียมภาพ...' });
+      setStatus({ stage: 'preprocess', progress: 0.05, message: t('preparing') });
 
       const img = new Image(); img.src = imageURL;
-      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('โหลดรูปไม่สำเร็จ')); });
+      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('load image failed')); });
 
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d', { willReadFrequently: true } as any) as CanvasRenderingContext2D | null;
@@ -316,7 +395,7 @@ export default function Page() {
 
       const processed = canvas.toDataURL('image/png');
       setProcessedURL(processed);
-      setStatus({ stage: 'ocr', progress: 0.0, message: 'กำลังอ่านตัวอักษร...' });
+      setStatus({ stage: 'ocr', progress: 0.0, message: t('reading') });
 
       const tesseractLang: 'tha' | 'eng' | 'tha+eng' = ocrLang === 'auto' ? 'tha+eng' : ocrLang;
       const worker = await getWorker(tesseractLang);
@@ -337,37 +416,39 @@ export default function Page() {
             if (!tooShort(cloudRaw) && (cloudRaw.length > (cloud?.length ?? 0))) cloud = cloudRaw;
           }
           if (!tooShort(cloud) && cloud.length > out.length) out = cloud;
-        } catch (e) { console.warn('Cloud OCR fallback failed:', e); }
+        } catch { /* ignore cloud fallback error */ }
       }
 
       const cleaned = tidyText(out);
       setText(cleaned);
 
-      // ----- Non-AI structuring (ดีขึ้นกว่าเดิม)
       const inv = parseInvoice(cleaned);
       const langForSmart: 'auto' | 'tha' | 'eng' = ocrLang === 'eng' ? 'eng' : ocrLang === 'tha' ? 'tha' : 'auto';
       const sp = smartParse(cleaned, { lang: langForSmart });
 
-      const isInvoice = looksLikeInvoice(cleaned) || inv.lineItems.length > 0 || !!inv.fields.total?.value || /INVOICE|RECEIPT/i.test(cleaned);
-      const finalFields: SmartFields = isInvoice ? inv.fields : sp.fields;
-      const finalLineItems: SmartLineItem[] = isInvoice ? inv.lineItems : (sp.lineItems ?? []);
+      const looksLikeInvoice =
+        inv.lineItems.length > 0 || !!inv.fields.total?.value || !!inv.fields.docNo || /INVOICE|RECEIPT/i.test(cleaned);
+
+      const finalFields: SmartFields = looksLikeInvoice ? inv.fields : sp.fields;
+      const finalLineItems: SmartLineItem[] = looksLikeInvoice ? inv.lineItems : (sp.lineItems ?? []);
+      const finalSections = looksLikeInvoice ? buildInvoiceSections(inv, uiLang) : sp.sections;
+
+      setSections(finalSections);
       setDocFields(finalFields);
       setLineItems(finalLineItems);
-      setSections(isInvoice ? sectionizeInvoice(cleaned) : (sp.sections ?? []));
 
       setStatus({ stage: 'done', progress: 1 });
-      setToast({ type: 'success', message: 'ประมวลผลเสร็จแล้ว' });
+      setToast({ type: 'success', message: t('toastDone') });
       setTimeout(() => setToast(null), 2200);
 
-      // ----- Auto AI refine (ถ้าเปิด)
-      if (autoAI) { await aiRefineCall(cleaned, false); }
+      // Auto AI refine (ถ้าเปิด)
+      if (autoAI) aiRefineCall(cleaned, false);
     } catch (err: any) {
-      console.error(err);
-      setStatus({ stage: 'error', progress: 0, message: (err as Error).message });
-      setToast({ type: 'error', message: `ผิดพลาด: ${String(err?.message || err)}` });
-      setTimeout(() => setToast(null), 3200);
+      setStatus({ stage: 'error', progress: 0, message: String(err?.message || err) });
+      setToast({ type: 'error', message: `${t('error')}: ${String(err?.message || err)}` });
+      setTimeout(() => setToast(null), 3400);
     }
-  }, [imageURL, cvReady, ocrLang, getWorker, cloudOCR, urlToDataURL, tidyText, autoAI, aiRefineCall]);
+  }, [imageURL, cvReady, ocrLang, getWorker, cloudOCR, urlToDataURL, tidyText, t, buildInvoiceSections, uiLang, autoAI, aiRefineCall]);
 
   useEffect(() => { if (imageURL && cvReady) runPipeline(); }, [imageURL, cvReady, runPipeline]);
 
@@ -384,11 +465,25 @@ export default function Page() {
       <header className="app-header">
         <div className="inner">
           <div className="logo">{APP_NAME}</div>
-          <div className="small muted">ไทย/อังกฤษ · OpenCV + Tesseract · Smart Parser</div>
+          <div className="small muted">{t('appTag')}</div>
           <div className="grow" />
-          <div className="small muted" title={`AI provider: ${PROVIDER}`}>AI: <b>{PROVIDER}</b></div>
+
+          {/* UI language toggle */}
+          <label className="flex flex-center small muted" style={{ gap: 8 }}>
+            TH / EN
+            <span className="switch" data-on="green" title="สลับภาษา UI">
+              <input
+                type="checkbox"
+                checked={uiLang === 'en'}
+                onChange={(e) => setUiLang(e.target.checked ? 'en' : 'th')}
+              />
+              <span className="dot" />
+              <span className="track" />
+            </span>
+          </label>
+
           <button className="btn btn-outline btn-sm" onClick={downloadJSON} disabled={!text}>
-            <Download size={16}/> ดาวน์โหลด JSON
+            <Download size={16}/> {t('downloadJSON')}
           </button>
         </div>
       </header>
@@ -407,15 +502,15 @@ export default function Page() {
       >
         <div className="stack">
           <div className="flex flex-center">
-            <div className="badge"><ScanLine size={16}/> อัปโหลดเอกสาร</div>
+            <div className="badge"><ScanLine size={16}/> {t('uploadBadge')}</div>
           </div>
-          <div className="muted">ลากไฟล์มาวางที่นี่ หรือ</div>
+          <div className="muted">{t('dragHere')}</div>
           <div>
-            <button className="btn btn-primary" onClick={onPickFile}>เลือกไฟล์</button>
+            <button className="btn btn-primary" onClick={onPickFile}>{t('chooseFile')}</button>
             <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hide"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
           </div>
-          <div className="small muted">รองรับ .jpg / .png ขนาดไม่เกิน ~10MB</div>
+          <div className="small muted">{t('formats')}</div>
         </div>
       </section>
 
@@ -424,40 +519,23 @@ export default function Page() {
         {/* Left: Images */}
         <div className="stack">
           <div className="card">
-            <div className="card-header"><div className="card-title flex flex-center"><ImageIcon size={18}/> ภาพต้นฉบับ</div></div>
+            <div className="card-header"><div className="card-title flex flex-center"><ImageIcon size={18}/> {t('originalImage')}</div></div>
             <div className="card-body">
               <div className="media-box" style={{minHeight: 240}}>
-                {imageURL ? <img src={imageURL} alt="original" /> : <div className="small muted p-4">ยังไม่เลือกรูป</div>}
+                {imageURL ? <img src={imageURL} alt="original" /> : <div className="small muted p-4">—</div>}
               </div>
             </div>
           </div>
 
           <div className="card">
-            <div className="card-header"><div className="card-title">ภาพหลังปรับ (สำหรับ OCR)</div></div>
+            <div className="card-header"><div className="card-title">{t('processedImage')}</div></div>
             <div className="card-body">
               <div className="media-box" style={{minHeight: 240}}>
                 <canvas ref={canvasRef} style={{width: '100%'}} />
               </div>
               <div className="flex mt-4">
-                <button onClick={reset} className="btn btn-outline">ล้างค่า</button>
-                <button onClick={runPipeline} className="btn btn-primary" disabled={!imageURL || !cvReady}>ประมวลผลอีกครั้ง</button>
-              </div>
-              {/* Status */}
-              <div className={`status mt-3 status--${status.stage}`}>
-                <span className="dot" />
-                <span className="label">
-                  {status.stage === 'idle' && 'รออัปโหลด'}
-                  {status.stage === 'preprocess' && 'กำลังเตรียมภาพ'}
-                  {status.stage === 'ocr' && (status.message || 'กำลังอ่านตัวอักษร…')}
-                  {status.stage === 'done' && 'เสร็จสมบูรณ์'}
-                  {status.stage === 'error' && `ผิดพลาด: ${status.message}`}
-                </span>
-                {(status.stage === 'preprocess' || status.stage === 'ocr') && (
-                  <>
-                    <div className="progress-inline"><span style={{ width: `${Math.round((status.progress || 0) * 100)}%` }} /></div>
-                    <span className="pct">{Math.round((status.progress || 0) * 100)}%</span>
-                  </>
-                )}
+                <button onClick={reset} className="btn btn-outline">{t('reset')}</button>
+                <button onClick={runPipeline} className="btn btn-primary" disabled={!imageURL || !cvReady}>{t('reprocess')}</button>
               </div>
             </div>
           </div>
@@ -466,71 +544,95 @@ export default function Page() {
         {/* Right: Results */}
         <div className="stack">
           <div className="card">
+            {/* Header with controls */}
             <div className="card-header">
-              <div className="card-title">ผลลัพธ์ OCR</div>
+              <div className="card-title">{t('resultsTitle')}</div>
               <div className="flex flex-center">
-                <span className="small muted">ภาษาเอกสาร</span>
+                <span className="small muted">{t('docLang')}</span>
                 <select value={ocrLang} onChange={(e) => setOcrLang(e.target.value as any)} className="select" style={{width:160}}>
                   <option value="auto">Auto</option>
                   <option value="tha">ไทย (tha)</option>
-                  <option value="eng">อังกฤษ (eng)</option>
+                  <option value="eng">English (eng)</option>
                   <option value="tha+eng">ไทย+อังกฤษ</option>
                 </select>
 
-                {/* Auto AI toggle */}
-                <label className="flex flex-center small muted" style={{gap:8}}>
-                  Auto AI
-                  <span className="switch">
+                {/* Auto AI toggle (สีเลือกได้: blue/green) */}
+                <label className="flex flex-center small muted" style={{ gap: 8 }}>
+                  {t('autoAI')}
+                  <span className="switch" data-on="blue" title="ปรับภาษา/จัดหัวข้ออัตโนมัติหลัง OCR">
                     <input type="checkbox" checked={autoAI} onChange={(e) => setAutoAI(e.target.checked)} />
-                    <span className="dot" /><span className="track" />
+                    <span className="dot" />
+                    <span className="track" />
                   </span>
                 </label>
 
-                {/* ปุ่ม ลอง AI */}
-                <button className="btn btn-primary" onClick={() => aiRefineCall(text, true)} disabled={!text} title="ปรับภาษา/จัดหัวข้อจากผล OCR">
-                  <Wand2 size={16}/> ลอง AI
-                </button>
+                {/* ปุ่ม ลอง AI (manual) — ซ่อนถ้าเปิด Auto */}
+                {!autoAI && (
+                  <button className="btn btn-primary" onClick={() => aiRefineCall(text, true)} disabled={!text} title="Refine with AI">
+                    <Wand2 size={16}/> {t('tryAI')}
+                  </button>
+                )}
               </div>
             </div>
 
             <div className="card-body">
+              {/* Status at very top of results */}
+              <div className={`status ${status.stage ? `status--${status.stage}` : ''}`} style={{marginTop: 0}}>
+                <span className="dot" />
+                <span className="label">
+                  {t('status')}:&nbsp;
+                  {status.stage === 'idle' && t('waiting')}
+                  {status.stage === 'preprocess' && t('preparing')}
+                  {status.stage === 'ocr' && (status.message || t('reading'))}
+                  {status.stage === 'done' && t('done')}
+                  {status.stage === 'error' && `${t('error')}: ${status.message}`}
+                </span>
+                {(status.stage === 'preprocess' || status.stage === 'ocr') && (
+                  <>
+                    <div className="progress-inline"><span style={{ width: `${Math.round((status.progress || 0) * 100)}%` }} /></div>
+                    <span className="pct">{Math.round((status.progress || 0) * 100)}%</span>
+                  </>
+                )}
+              </div>
+
               {/* Smart summary */}
               {docFields && (
-                <div className="alert">
+                <div className="alert mt-4">
                   <div className="stack">
-                    <div className="title">สรุปเอกสาร (Smart Parser / AI)</div>
-                    {docFields.name && <div className="small"><b>ชื่อ:</b> {docFields.name}</div>}
-                    {docFields.title && <div className="small"><b>ตำแหน่ง:</b> {docFields.title}</div>}
-                    {docFields.docType && <div className="small"><b>ชนิดเอกสาร:</b> {docFields.docType}</div>}
-                    {docFields.docNo && <div className="small"><b>เลขที่:</b> {docFields.docNo}</div>}
-                    {docFields.date && <div className="small"><b>วันที่:</b> {docFields.date}</div>}
-                    {docFields.dueDate && <div className="small"><b>กำหนดชำระ:</b> {docFields.dueDate}</div>}
+                    <div className="title">{t('summary')}</div>
+                    {docFields.name   && <div className="small"><b>{t('name')}:</b> {docFields.name}</div>}
+                    {docFields.title  && <div className="small"><b>{t('title')}:</b> {docFields.title}</div>}
+                    {docFields.docType && <div className="small"><b>{t('docType')}:</b> {docFields.docType}</div>}
+                    {docFields.docNo  && <div className="small"><b>{t('docNo')}:</b> {docFields.docNo}</div>}
+                    {docFields.date   && <div className="small"><b>{t('date')}:</b> {docFields.date}</div>}
+                    {docFields.dueDate&& <div className="small"><b>{t('dueDate')}:</b> {docFields.dueDate}</div>}
                     {(docFields.seller || docFields.buyer) && (
                       <>
-                        {docFields.seller && <div className="small"><b>ผู้ขาย/ผู้ให้บริการ:</b> {docFields.seller}</div>}
-                        {docFields.buyer && <div className="small"><b>ผู้ซื้อ/ลูกค้า:</b> {docFields.buyer}</div>}
+                        {docFields.seller && <div className="small"><b>{t('seller')}:</b> {docFields.seller}</div>}
+                        {docFields.buyer && <div className="small"><b>{t('buyer')}:</b> {docFields.buyer}</div>}
                       </>
                     )}
                     {(docFields.subtotal || docFields.vat || docFields.total) && (
                       <>
-                        {docFields.subtotal?.text && <div className="small"><b>Subtotal:</b> {docFields.subtotal.text}</div>}
-                        {docFields.vat?.text && <div className="small"><b>VAT/Tax:</b> {docFields.vat.text}</div>}
-                        {docFields.total?.text && <div className="small"><b>Total:</b> {docFields.total.text}</div>}
+                        {docFields.subtotal?.text && <div className="small"><b>{t('subtotal')}:</b> {docFields.subtotal.text}</div>}
+                        {docFields.vat?.text      && <div className="small"><b>{t('vat')}:</b> {docFields.vat.text}</div>}
+                        {docFields.total?.text    && <div className="small"><b>{t('total')}:</b> {docFields.total.text}</div>}
                       </>
                     )}
                   </div>
                 </div>
               )}
 
+              {/* Line items (if any) */}
               {lineItems?.length ? (
                 <div className="mt-4">
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>รายการ</th>
-                        <th className="num">จำนวน</th>
-                        <th className="num">ราคาต่อหน่วย</th>
-                        <th className="num">เป็นเงิน</th>
+                        <th>{t('lineItems')}</th>
+                        <th className="num">{uiLang === 'th' ? 'จำนวน' : 'Qty'}</th>
+                        <th className="num">{uiLang === 'th' ? 'ราคาต่อหน่วย' : 'Unit price'}</th>
+                        <th className="num">{uiLang === 'th' ? 'เป็นเงิน' : 'Amount'}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -550,11 +652,11 @@ export default function Page() {
               {/* Raw text + sections */}
               <div className="grid-2 mt-6">
                 <div>
-                  <h3 className="small muted">ข้อความดิบ</h3>
+                  <h3 className="small muted">{t('rawText')}</h3>
                   <div className="json-viewer mt-2"><pre><code>{text || '—'}</code></pre></div>
                 </div>
                 <div>
-                  <h3 className="small muted">แยกเป็นหัวข้อ (heuristic/AI)</h3>
+                  <h3 className="small muted">{t('sections')}</h3>
                   <div className="stack mt-2">
                     {sections.length ? sections.map((s, i) => (
                       <div key={i} className="card">
@@ -574,7 +676,7 @@ export default function Page() {
             </div>
 
             <div className="card-footer small muted">
-              ใช้ OpenCV.js + Tesseract.js — ประมวลผลบนเบราว์เซอร์ทั้งหมด
+              OpenCV.js + Tesseract.js — runs fully in your browser
             </div>
           </div>
         </div>
