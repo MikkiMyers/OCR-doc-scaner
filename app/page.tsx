@@ -625,7 +625,6 @@ export default function Page() {
         </div>
       </section>
 
-      {/* Two-column layout */}
       <section className="layout mt-6">
         {/* Left: Images */}
         <div className="stack">
@@ -655,7 +654,6 @@ export default function Page() {
         {/* Right: Results */}
         <div className="stack">
           <div className="card">
-            {/* Header with controls */}
             <div className="card-header">
               <div className="card-title">{t('resultsTitle')}</div>
               <div className="flex flex-center">
@@ -667,7 +665,6 @@ export default function Page() {
                   <option value="tha+eng">ไทย+อังกฤษ</option>
                 </select>
 
-                {/* Auto AI toggle */}
                 <label className="flex flex-center small muted" style={{ gap: 8 }}>
                   {t('autoAI')}
                   <span className="switch" data-on="blue" title="ปรับภาษา/จัดหัวข้ออัตโนมัติหลัง OCR">
@@ -737,7 +734,7 @@ export default function Page() {
                       </>
                     )}
 
-                    {/* Always show docType */}
+                    {/* show docType */}
                     {docFields.docType && <div className="small"><b>{t('docType')}:</b> {docFields.docType}</div>}
 
                     {/* Invoice-only fields */}
@@ -765,7 +762,6 @@ export default function Page() {
                 </div>
               )}
 
-              {/* Line items (if any) */}
               {lineItems?.length ? (
                 <div className="mt-4">
                   <table className="table">
@@ -818,7 +814,7 @@ export default function Page() {
             </div>
 
             <div className="card-footer small muted">
-              OpenCV.js + Tesseract.js — runs fully in your browser
+              OpenCV.js + Tesseract.js 
             </div>
           </div>
         </div>
